@@ -58,6 +58,7 @@
   .badge.Aktiv { background: var(--green-bg); color: var(--green); }
   .badge.Pausiert { background: var(--amber-bg); color: var(--amber); }
   .badge.Beendet { background: #eee; color: #666; }
+  .badge.Bevorstehend { background: var(--purple-bg); color: var(--purple); }
   .mini-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 6px; vertical-align: middle; }
   .mini-badge.auto { background: var(--green-bg); color: var(--green); }
   .mini-badge.manuell { background: var(--amber-bg); color: var(--amber); }
@@ -167,6 +168,22 @@ function isActiveInMonth(p, monthStr) {
   if (ende && ende < monthStart) return false;
   return true;
 }
+
+// Status wird automatisch aus der Projektlaufzeit erkannt: "Noch nicht aktiv" (Start liegt in der
+// Zukunft), "Beendet" (Ende liegt in der Vergangenheit) oder sonst "Aktiv". "Pausiert" ist die einzige
+// manuelle Ausnahme – wird sie im Projekt gesetzt, überschreibt sie die automatische Erkennung.
+function computedStatus(p) {
+  if (p.status === 'Pausiert') return 'Pausiert';
+  const today = new Date();
+  const todayUTC = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  const ps = parseDateUTC(p.start_date);
+  const pe = parseDateUTC(p.end_date);
+  if (ps !== null && ps > todayUTC) return 'Noch nicht aktiv';
+  if (pe !== null && pe < todayUTC) return 'Beendet';
+  return 'Aktiv';
+}
+// CSS-Klassennamen dürfen keine Leerzeichen enthalten, daher eigene Klasse für "Noch nicht aktiv".
+function statusBadgeClass(status) { return status === 'Noch nicht aktiv' ? 'Bevorstehend' : status; }
 
 // ---------- AUTOMATISCHE SOLL-BERECHNUNG (aus Projektlaufzeit) ----------
 
@@ -765,7 +782,7 @@ function dashboardHTML() {
   const soll = sumEntries(sollEntries);
   const ist = sumEntries(istEntries);
 
-  const aktiveFreelancer = data.projects.filter(p => p.status === 'Aktiv').length;
+  const aktiveFreelancer = data.projects.filter(p => computedStatus(p) === 'Aktiv').length;
   const margen = data.projects.map(margeH).filter(v => v > 0);
   const avgMargeH = margen.length ? margen.reduce((a, b) => a + b, 0) / margen.length : 0;
   const margeGesamtFaktor = ist.kosten > 0 ? ist.umsatz / ist.kosten : 0;
@@ -887,7 +904,7 @@ function setupChart() {
 function filteredSortedProjects() {
   let list = data.projects.slice();
   if (projFilterKunde !== 'all') list = list.filter(p => p.kunde === projFilterKunde);
-  if (projFilterStatus !== 'all') list = list.filter(p => p.status === projFilterStatus);
+  if (projFilterStatus !== 'all') list = list.filter(p => computedStatus(p) === projFilterStatus);
 
   const dateVal = (s, fallback) => s ? parseDateUTC(s) : fallback;
   if (projSort === 'start_asc') list.sort((a, b) => dateVal(a.start_date, Infinity) - dateVal(b.start_date, Infinity));
@@ -917,7 +934,7 @@ function projekteHTML() {
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
       <select id="projFilterStatusSel">
         <option value="all" ${projFilterStatus === 'all' ? 'selected' : ''}>Alle</option>
-        ${['Aktiv', 'Pausiert', 'Beendet'].map(s => `<option value="${s}" ${projFilterStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+        ${['Noch nicht aktiv', 'Aktiv', 'Pausiert', 'Beendet'].map(s => `<option value="${s}" ${projFilterStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
       </select>
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Sortieren:</label>
       <select id="projSortSel">
@@ -935,7 +952,9 @@ function projekteHTML() {
       <table class="projekte-table">
         <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
         <tbody>
-          ${list.map(p => `
+          ${list.map(p => {
+            const st = computedStatus(p);
+            return `
             <tr>
               <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
               <td>${p.wochenstunden}</td>
@@ -943,9 +962,10 @@ function projekteHTML() {
               <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
               <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
               <td>${[p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' + ') || '–'}</td>
-              <td><span class="badge ${p.status}">${p.status}</span></td>
+              <td><span class="badge ${statusBadgeClass(st)}">${st}</span></td>
               <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
-            </tr>`).join('')}
+            </tr>`;
+          }).join('')}
           ${!list.length ? '<tr><td colspan="13" class="empty">Keine Projekte für diesen Filter.</td></tr>' : ''}
         </tbody>
       </table>
@@ -960,7 +980,7 @@ function openProjectModal(id) {
   const p = id ? project(id) : null;
   modalConfig = {
     type: 'project', id: id || null,
-    values: p ? { ...p } : { kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Aktiv', consultant1_id: '', consultant2_id: '' },
+    values: p ? { ...p } : { kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
   };
   render();
 }
@@ -989,9 +1009,13 @@ function renderModal() {
       <div class="field-row">
         <div class="field"><label>Std./Woche</label><input type="number" id="f_wochenstunden" value="${v.wochenstunden}"></div>
         <div class="field"><label>Status</label>
-          <select id="f_status">${['Aktiv','Pausiert','Beendet'].map(s => `<option value="${s}" ${v.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+          <select id="f_status">
+            <option value="auto" ${v.status !== 'Pausiert' ? 'selected' : ''}>Automatisch (aus Start-/Enddatum)</option>
+            <option value="Pausiert" ${v.status === 'Pausiert' ? 'selected' : ''}>Pausiert</option>
+          </select>
         </div>
       </div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Status wird normalerweise automatisch aus Start-/Enddatum erkannt (Noch nicht aktiv / Aktiv / Beendet). "Pausiert" ist die einzige manuelle Ausnahme.</div>
       <div class="field-row">
         <div class="field"><label>Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
         <div class="field"><label>Charge / h (Umsatz)</label><input type="number" id="f_chargeH" value="${v.charge_h}"></div>
@@ -1018,7 +1042,7 @@ function renderModal() {
       wochenstunden: Number(document.getElementById('f_wochenstunden').value) || 0,
       pay_h: Number(document.getElementById('f_payH').value) || 0,
       charge_h: Number(document.getElementById('f_chargeH').value) || 0,
-      status: document.getElementById('f_status').value,
+      status: document.getElementById('f_status').value === 'Pausiert' ? 'Pausiert' : 'Auto',
       consultant1_id: document.getElementById('f_consultant1').value || null,
       consultant2_id: document.getElementById('f_consultant2').value || null,
     };
