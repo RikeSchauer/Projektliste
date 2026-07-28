@@ -120,6 +120,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+const MONTH_NAMES_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
 let session = null;
 let authMode = 'login'; // 'login' | 'signup'
@@ -277,6 +278,7 @@ function statusFromErf(erf, hasSoll) {
   return 'Kritisch';
 }
 function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return MONTH_NAMES[mo - 1] + ' ' + y; }
+function monthLabelEN(m) { const [y, mo] = m.split('-').map(Number); return MONTH_NAMES_EN[mo - 1] + ' ' + y; }
 
 // ---------- PROVISIONEN ----------
 
@@ -347,10 +349,11 @@ function consultantReportHTML() {
   const qMonths = monthsInQuarter(qYear, qNum);
   const qEntries = istAll.filter(e => qMonths.includes(e.month));
 
+  // Reports gehen an Consultants raus, die meist nur Englisch sprechen – deshalb komplett auf Englisch.
   const actions = `
     <div class="toolbar no-print" style="justify-content:space-between;">
-      <button class="btn" data-report-back="1">← Zurück zur Übersicht</button>
-      <button class="btn primary" data-report-print="1">Drucken / als PDF speichern</button>
+      <button class="btn" data-report-back="1">← Back to overview</button>
+      <button class="btn primary" data-report-print="1">Print / Save as PDF</button>
     </div>`;
 
   if (!c.is_team_lead) {
@@ -360,12 +363,12 @@ function consultantReportHTML() {
     return `
       <div class="card panel">
         ${actions}
-        <h2 style="margin-bottom:2px;">Provisionsabrechnung – ${c.name}</h2>
-        <div class="sub" style="margin-bottom:16px;">${monthLabel(provMonth)} · Satz ${fmtPct(c.rate)} auf zugerechneten IST-Rohertrag</div>
-        ${!rows.length ? '<div class="empty">Keine Projekte/IST-Stunden in diesem Monat.</div>' : `
+        <h2 style="margin-bottom:2px;">Commission Statement – ${c.name}</h2>
+        <div class="sub" style="margin-bottom:16px;">${monthLabelEN(provMonth)} · Rate ${fmtPct(c.rate)} on attributed actual gross profit</div>
+        ${!rows.length ? '<div class="empty">No projects/actual hours this month.</div>' : `
         <div class="table-scroll">
         <table>
-          <thead><tr><th>Kunde</th><th>Freelancer</th><th>Anteil</th><th>Stunden IST</th><th>Rohertrag (100%)</th><th>Angerechneter Rohertrag</th></tr></thead>
+          <thead><tr><th>Client</th><th>Freelancer</th><th>Share</th><th>Actual Hours</th><th>Gross Profit (100%)</th><th>Attributed Gross Profit</th></tr></thead>
           <tbody>
             ${rows.map(r => `<tr>
               <td>${r.kunde}</td>
@@ -377,8 +380,8 @@ function consultantReportHTML() {
             </tr>`).join('')}
           </tbody>
           <tfoot>
-            <tr style="font-weight:700;"><td colspan="5">Summe zugerechneter Rohertrag</td><td>${fmtEUR(total)}</td></tr>
-            <tr style="font-weight:700;color:var(--blue);"><td colspan="5">Provision (${fmtPct(c.rate)})</td><td>${fmtEUR(commission)}</td></tr>
+            <tr style="font-weight:700;"><td colspan="5">Total Attributed Gross Profit</td><td>${fmtEUR(total)}</td></tr>
+            <tr style="font-weight:700;color:var(--blue);"><td colspan="5">Commission (${fmtPct(c.rate)})</td><td>${fmtEUR(commission)}</td></tr>
           </tfoot>
         </table>
         </div>`}
@@ -394,13 +397,13 @@ function consultantReportHTML() {
     teamTotal += subtotal;
     return `
       <h3 style="font-size:13.5px;margin:16px 0 8px;">${m.name}</h3>
-      ${!rows.length ? '<div class="empty" style="padding:6px 0;">Keine Projekte/IST-Stunden in diesem Quartal.</div>' : `
+      ${!rows.length ? '<div class="empty" style="padding:6px 0;">No projects/actual hours this quarter.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Monat</th><th>Kunde</th><th>Freelancer</th><th>Anteil</th><th>Stunden IST</th><th>Rohertrag (100%)</th><th>Angerechneter Rohertrag</th></tr></thead>
+        <thead><tr><th>Month</th><th>Client</th><th>Freelancer</th><th>Share</th><th>Actual Hours</th><th>Gross Profit (100%)</th><th>Attributed Gross Profit</th></tr></thead>
         <tbody>
           ${rows.map(r => `<tr>
-            <td>${monthLabel(r.month)}</td>
+            <td>${monthLabelEN(r.month)}</td>
             <td>${r.kunde}</td>
             <td>${r.contractor}</td>
             <td>${fmtPct(r.share)}</td>
@@ -409,7 +412,7 @@ function consultantReportHTML() {
             <td>${fmtEUR(r.rohertragAnteil)}</td>
           </tr>`).join('')}
         </tbody>
-        <tfoot><tr style="font-weight:700;"><td colspan="6">Zwischensumme ${m.name}</td><td>${fmtEUR(subtotal)}</td></tr></tfoot>
+        <tfoot><tr style="font-weight:700;"><td colspan="6">Subtotal ${m.name}</td><td>${fmtEUR(subtotal)}</td></tr></tfoot>
       </table>
       </div>`}
     `;
@@ -419,14 +422,14 @@ function consultantReportHTML() {
   return `
     <div class="card panel">
       ${actions}
-      <h2 style="margin-bottom:2px;">Team-Provisionsabrechnung – ${c.name}</h2>
-      <div class="sub" style="margin-bottom:16px;">${quarterLabel(qYear, qNum)} (${qMonths.map(monthLabel).join(', ')}) · Satz ${fmtPct(c.team_rate)} auf IST-Rohertrag des Teams</div>
-      ${!members.length ? '<div class="empty">Keine Team-Mitglieder zugewiesen.</div>' : memberBlocks}
+      <h2 style="margin-bottom:2px;">Team Commission Statement – ${c.name}</h2>
+      <div class="sub" style="margin-bottom:16px;">${quarterLabel(qYear, qNum)} (${qMonths.map(monthLabelEN).join(', ')}) · Rate ${fmtPct(c.team_rate)} on the team's actual gross profit</div>
+      ${!members.length ? '<div class="empty">No team members assigned.</div>' : memberBlocks}
       <div style="margin-top:18px;padding-top:14px;border-top:2px solid var(--border);font-weight:700;display:flex;justify-content:space-between;">
-        <span>Team-Rohertrag gesamt (${quarterLabel(qYear, qNum)})</span><span>${fmtEUR(teamTotal)}</span>
+        <span>Total Team Gross Profit (${quarterLabel(qYear, qNum)})</span><span>${fmtEUR(teamTotal)}</span>
       </div>
       <div style="margin-top:6px;font-weight:700;display:flex;justify-content:space-between;color:var(--blue);">
-        <span>Provision an ${c.name} (${fmtPct(c.team_rate)})</span><span>${fmtEUR(commission)}</span>
+        <span>Commission to ${c.name} (${fmtPct(c.team_rate)})</span><span>${fmtEUR(commission)}</span>
       </div>
     </div>
   `;
