@@ -39,6 +39,7 @@
   .kpi.amber { background: var(--amber-bg); } .kpi.amber .value { color: var(--amber); }
   section.panel { margin-bottom: 22px; }
   section.panel h2 { font-size: 15px; margin: 0 0 12px; }
+  .table-scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .02em; }
@@ -232,6 +233,23 @@ function sumEntries(list) {
   }, { stunden: 0, umsatz: 0, kosten: 0, rohertrag: 0 });
 }
 function entriesOf(kind) { return data.entries.filter(e => e.kind === kind); }
+
+// Gruppiert SOLL- und IST-Zahlen nach Kunde: Umsatz (Stunden x Charge/h), Kosten (Stunden x Pay/h)
+// und Rohertrag (Umsatz - Kosten), summiert über alle Projekte des Kunden.
+function customerBreakdown(sollEntries, istEntries) {
+  const kunden = Array.from(new Set(data.projects.map(p => p.kunde))).sort();
+  return kunden.map(k => {
+    const projectIds = new Set(data.projects.filter(p => p.kunde === k).map(p => p.id));
+    const soll = sumEntries(sollEntries.filter(e => projectIds.has(e.project_id)));
+    const ist = sumEntries(istEntries.filter(e => projectIds.has(e.project_id)));
+    return {
+      kunde: k,
+      sollUmsatz: soll.umsatz, istUmsatz: ist.umsatz,
+      sollKosten: soll.kosten, istKosten: ist.kosten,
+      sollRohertrag: soll.rohertrag, istRohertrag: ist.rohertrag,
+    };
+  });
+}
 function allMonthsUsed() {
   const set = new Set();
   data.entries.forEach(e => set.add(e.month));
@@ -404,6 +422,8 @@ function dashboardHTML() {
   const monthOptions = ['<option value="all">Alle Monate</option>']
     .concat(months.map(m => `<option value="${m}" ${dashMonth === m ? 'selected' : ''}>${monthLabel(m)}</option>`)).join('');
 
+  const perKunde = customerBreakdown(sollEntries, istEntries);
+
   return `
     <div class="toolbar">
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Zeitraum:</label>
@@ -434,6 +454,30 @@ function dashboardHTML() {
           }).join('')}
         </tbody>
       </table>
+    </div>
+    <div class="card panel">
+      <h2>Umsatz pro Kunde ${dashMonth === 'all' ? '(alle Monate)' : '(' + monthLabel(dashMonth) + ')'}</h2>
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Kunde</th><th>Umsatz SOLL</th><th>Umsatz IST</th><th>Kosten SOLL</th><th>Kosten IST</th><th>Rohertrag SOLL</th><th>Rohertrag IST</th><th>Erfüllung Rohertrag</th></tr></thead>
+        <tbody>
+          ${perKunde.map(k => {
+            const erf = k.sollRohertrag > 0 ? k.istRohertrag / k.sollRohertrag : 0;
+            return `<tr>
+              <td><strong>${k.kunde}</strong></td>
+              <td>${fmtEUR(k.sollUmsatz)}</td>
+              <td>${fmtEUR(k.istUmsatz)}</td>
+              <td>${fmtEUR(k.sollKosten)}</td>
+              <td>${fmtEUR(k.istKosten)}</td>
+              <td>${fmtEUR(k.sollRohertrag)}</td>
+              <td style="color:${k.istRohertrag < k.sollRohertrag ? 'var(--red)' : 'var(--green)'}">${fmtEUR(k.istRohertrag)}</td>
+              <td>${k.sollRohertrag > 0 ? fmtPct(erf) : '–'}</td>
+            </tr>`;
+          }).join('')}
+          ${!perKunde.length ? '<tr><td colspan="8" class="empty">Noch keine Projekte/Kunden vorhanden.</td></tr>' : ''}
+        </tbody>
+      </table>
+      </div>
     </div>
     <div class="card panel">
       <div class="toolbar" style="margin-bottom:10px;justify-content:space-between;">
@@ -485,6 +529,7 @@ function projekteHTML() {
     </div>
     ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
+      <div class="table-scroll">
       <table>
         <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Status</th><th></th></tr></thead>
         <tbody>
@@ -500,6 +545,7 @@ function projekteHTML() {
             </tr>`).join('')}
         </tbody>
       </table>
+      </div>
     </div>
     <div class="empty" style="padding-top:0;">"Sollstunden gesamt" wird automatisch aus Start-/Enddatum und Std./Woche berechnet und im SOLL-Tab auf die Monate verteilt.</div>
     `}
@@ -595,6 +641,7 @@ function monthEntryHTML(kind) {
       ${kind === 'soll' ? '<span style="font-size:12px;color:var(--muted);">Werte werden automatisch aus der Projektlaufzeit berechnet – <span class="mini-badge auto">auto</span> = berechnet, <span class="mini-badge manuell">manuell</span> = von dir angepasst.</span>' : ''}
     </div>
     <div class="card panel">
+      <div class="table-scroll">
       <table>
         <thead><tr><th>Kunde</th><th>Contractor</th><th>Stunden</th><th>Umsatz</th><th>Kosten</th><th>Rohertrag</th></tr></thead>
         <tbody>
@@ -619,6 +666,7 @@ function monthEntryHTML(kind) {
           </tr>
         </tfoot>
       </table>
+      </div>
       ${!data.projects.length ? '<div class="empty">Erst Projekte im Tab "Projekte" anlegen.</div>' : ''}
     </div>
   `;
