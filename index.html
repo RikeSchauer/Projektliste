@@ -93,6 +93,12 @@
   .banner { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
   .banner.error { background: var(--red-bg); color: var(--red); }
   .banner.info { background: var(--blue-bg); color: var(--blue); }
+  @media print {
+    header.top, nav.tabs, footer.hint, .no-print { display: none !important; }
+    body { background: #fff; }
+    #app { max-width: none; padding: 0; }
+    .card { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; }
+  }
 </style>
 </head>
 <body>
@@ -131,6 +137,7 @@ let trendMetric = 'umsatz';
 let trendChart = null;
 let modalConfig = null;
 let realtimeChannel = null;
+let reportConfig = null; // { consultantId } – wenn gesetzt, wird im Provisionen-Tab die Abrechnung statt der Übersicht gezeigt
 
 function currentMonthStr() {
   const d = new Date();
@@ -311,6 +318,120 @@ function monthsInQuarter(year, quarter) {
 }
 function quarterLabel(year, quarter) { return 'Q' + quarter + ' ' + year; }
 
+// Detail-Zeilen (pro Projekt/Freelancer) für die Provisionsabrechnung eines Consultants,
+// über eine gegebene Liste von IST-Einträgen (Monat oder ganzes Quartal).
+function projectRowsForConsultant(consultantId, entries) {
+  const rows = [];
+  for (const e of entries) {
+    const p = project(e.project_id);
+    if (!p) continue;
+    const share = consultantShareForProject(p, consultantId);
+    if (share <= 0) continue;
+    const c = computeEntry(e);
+    rows.push({
+      month: e.month, kunde: p.kunde, contractor: p.contractor,
+      stunden: c.stunden, rohertragVoll: c.rohertrag, share, rohertragAnteil: c.rohertrag * share,
+    });
+  }
+  return rows.sort((a, b) => a.month === b.month ? a.kunde.localeCompare(b.kunde) : a.month.localeCompare(b.month));
+}
+
+// Druckbare Provisionsabrechnung für einen einzelnen Consultant (Monat) oder Team-Lead (Quartal),
+// zum Versenden an den Consultant. Wird statt der Übersicht gezeigt, solange reportConfig gesetzt ist.
+function consultantReportHTML() {
+  const c = consultant(reportConfig.consultantId);
+  if (!c) { reportConfig = null; return provisionenHTML(); }
+  const istAll = entriesOf('ist');
+  const monthEntries = istAll.filter(e => e.month === provMonth);
+  const { year: qYear, quarter: qNum } = quarterOfMonth(provMonth);
+  const qMonths = monthsInQuarter(qYear, qNum);
+  const qEntries = istAll.filter(e => qMonths.includes(e.month));
+
+  const actions = `
+    <div class="toolbar no-print" style="justify-content:space-between;">
+      <button class="btn" data-report-back="1">← Zurück zur Übersicht</button>
+      <button class="btn primary" data-report-print="1">Drucken / als PDF speichern</button>
+    </div>`;
+
+  if (!c.is_team_lead) {
+    const rows = projectRowsForConsultant(c.id, monthEntries);
+    const total = rows.reduce((s, r) => s + r.rohertragAnteil, 0);
+    const commission = total * (c.rate || 0);
+    return `
+      <div class="card panel">
+        ${actions}
+        <h2 style="margin-bottom:2px;">Provisionsabrechnung – ${c.name}</h2>
+        <div class="sub" style="margin-bottom:16px;">${monthLabel(provMonth)} · Satz ${fmtPct(c.rate)} auf zugerechneten IST-Rohertrag</div>
+        ${!rows.length ? '<div class="empty">Keine Projekte/IST-Stunden in diesem Monat.</div>' : `
+        <div class="table-scroll">
+        <table>
+          <thead><tr><th>Kunde</th><th>Freelancer</th><th>Anteil</th><th>Stunden IST</th><th>Rohertrag (100%)</th><th>Angerechneter Rohertrag</th></tr></thead>
+          <tbody>
+            ${rows.map(r => `<tr>
+              <td>${r.kunde}</td>
+              <td>${r.contractor}</td>
+              <td>${fmtPct(r.share)}</td>
+              <td>${fmtNum(r.stunden, 1)}</td>
+              <td>${fmtEUR(r.rohertragVoll)}</td>
+              <td>${fmtEUR(r.rohertragAnteil)}</td>
+            </tr>`).join('')}
+          </tbody>
+          <tfoot>
+            <tr style="font-weight:700;"><td colspan="5">Summe zugerechneter Rohertrag</td><td>${fmtEUR(total)}</td></tr>
+            <tr style="font-weight:700;color:var(--blue);"><td colspan="5">Provision (${fmtPct(c.rate)})</td><td>${fmtEUR(commission)}</td></tr>
+          </tfoot>
+        </table>
+        </div>`}
+      </div>
+    `;
+  }
+
+  const members = data.consultants.filter(m => m.team_lead_id === c.id);
+  let teamTotal = 0;
+  const memberBlocks = members.map(m => {
+    const rows = projectRowsForConsultant(m.id, qEntries);
+    const subtotal = rows.reduce((s, r) => s + r.rohertragAnteil, 0);
+    teamTotal += subtotal;
+    return `
+      <h3 style="font-size:13.5px;margin:16px 0 8px;">${m.name}</h3>
+      ${!rows.length ? '<div class="empty" style="padding:6px 0;">Keine Projekte/IST-Stunden in diesem Quartal.</div>' : `
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Monat</th><th>Kunde</th><th>Freelancer</th><th>Anteil</th><th>Stunden IST</th><th>Rohertrag (100%)</th><th>Angerechneter Rohertrag</th></tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr>
+            <td>${monthLabel(r.month)}</td>
+            <td>${r.kunde}</td>
+            <td>${r.contractor}</td>
+            <td>${fmtPct(r.share)}</td>
+            <td>${fmtNum(r.stunden, 1)}</td>
+            <td>${fmtEUR(r.rohertragVoll)}</td>
+            <td>${fmtEUR(r.rohertragAnteil)}</td>
+          </tr>`).join('')}
+        </tbody>
+        <tfoot><tr style="font-weight:700;"><td colspan="6">Zwischensumme ${m.name}</td><td>${fmtEUR(subtotal)}</td></tr></tfoot>
+      </table>
+      </div>`}
+    `;
+  }).join('');
+  const commission = teamTotal * (c.team_rate || 0);
+
+  return `
+    <div class="card panel">
+      ${actions}
+      <h2 style="margin-bottom:2px;">Team-Provisionsabrechnung – ${c.name}</h2>
+      <div class="sub" style="margin-bottom:16px;">${quarterLabel(qYear, qNum)} (${qMonths.map(monthLabel).join(', ')}) · Satz ${fmtPct(c.team_rate)} auf IST-Rohertrag des Teams</div>
+      ${!members.length ? '<div class="empty">Keine Team-Mitglieder zugewiesen.</div>' : memberBlocks}
+      <div style="margin-top:18px;padding-top:14px;border-top:2px solid var(--border);font-weight:700;display:flex;justify-content:space-between;">
+        <span>Team-Rohertrag gesamt (${quarterLabel(qYear, qNum)})</span><span>${fmtEUR(teamTotal)}</span>
+      </div>
+      <div style="margin-top:6px;font-weight:700;display:flex;justify-content:space-between;color:var(--blue);">
+        <span>Provision an ${c.name} (${fmtPct(c.team_rate)})</span><span>${fmtEUR(commission)}</span>
+      </div>
+    </div>
+  `;
+}
+
 function provisionenHTML() {
   const istAll = entriesOf('ist');
   const monthEntries = istAll.filter(e => e.month === provMonth);
@@ -356,7 +477,7 @@ function provisionenHTML() {
       ${!individuals.length ? '<div class="empty">Keine individuellen Consultants (ohne Team-Lead-Status) angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Consultant</th><th>Zugerechneter Rohertrag</th><th>Satz</th><th>Provision ${monthLabel(provMonth)}</th></tr></thead>
+        <thead><tr><th>Consultant</th><th>Zugerechneter Rohertrag</th><th>Satz</th><th>Provision ${monthLabel(provMonth)}</th><th></th></tr></thead>
         <tbody>
           ${individuals.map(c => {
             const rev = attributedRevenue(c.id, monthEntries);
@@ -366,6 +487,7 @@ function provisionenHTML() {
               <td>${fmtEUR(rev)}</td>
               <td>${fmtPct(c.rate)}</td>
               <td>${fmtEUR(commission)}</td>
+              <td><button class="link" data-report="${c.id}">Report</button></td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -402,7 +524,7 @@ function provisionenHTML() {
       ${!teamLeads.length ? '<div class="empty">Kein Team-Lead angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Team-Lead</th><th>Team-Mitglieder</th><th>Team-Rohertrag (Quartal)</th><th>Satz</th><th>Provision ${quarterLabel(qYear, qNum)}</th></tr></thead>
+        <thead><tr><th>Team-Lead</th><th>Team-Mitglieder</th><th>Team-Rohertrag (Quartal)</th><th>Satz</th><th>Provision ${quarterLabel(qYear, qNum)}</th><th></th></tr></thead>
         <tbody>
           ${teamLeads.map(lead => {
             const members = data.consultants.filter(c => c.team_lead_id === lead.id);
@@ -414,6 +536,7 @@ function provisionenHTML() {
               <td>${fmtEUR(teamRev)}</td>
               <td>${fmtPct(lead.team_rate)}</td>
               <td>${fmtEUR(commission)}</td>
+              <td><button class="link" data-report="${lead.id}">Report</button></td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -610,14 +733,14 @@ function render() {
     <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
   `;
   document.getElementById('logoutBtn').addEventListener('click', handleLogout);
-  app.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { activeTab = b.dataset.tab; render(); }));
+  app.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { activeTab = b.dataset.tab; reportConfig = null; render(); }));
 
   const content = document.getElementById('tab-content');
   if (activeTab === 'dashboard') content.innerHTML = dashboardHTML();
   else if (activeTab === 'projekte') content.innerHTML = projekteHTML();
   else if (activeTab === 'soll') content.innerHTML = monthEntryHTML('soll');
   else if (activeTab === 'ist') content.innerHTML = monthEntryHTML('ist');
-  else if (activeTab === 'provisionen') content.innerHTML = provisionenHTML();
+  else if (activeTab === 'provisionen') content.innerHTML = reportConfig ? consultantReportHTML() : provisionenHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
@@ -954,7 +1077,12 @@ function wireTabEvents() {
   document.querySelectorAll('[data-edit-consultant]').forEach(b => b.addEventListener('click', () => openConsultantModal(b.dataset.editConsultant)));
   document.querySelectorAll('[data-del-consultant]').forEach(b => b.addEventListener('click', () => deleteConsultant(b.dataset.delConsultant)));
   const provPicker = document.getElementById('provMonthPicker');
-  if (provPicker) provPicker.addEventListener('change', () => { provMonth = provPicker.value; render(); });
+  if (provPicker) provPicker.addEventListener('change', () => { provMonth = provPicker.value; reportConfig = null; render(); });
+  document.querySelectorAll('[data-report]').forEach(b => b.addEventListener('click', () => { reportConfig = { consultantId: b.dataset.report }; render(); }));
+  const reportBack = document.querySelector('[data-report-back]');
+  if (reportBack) reportBack.addEventListener('click', () => { reportConfig = null; render(); });
+  const reportPrint = document.querySelector('[data-report-print]');
+  if (reportPrint) reportPrint.addEventListener('click', () => window.print());
   document.querySelectorAll('input[data-kind]').forEach(inp => {
     inp.addEventListener('change', () => {
       const kind = inp.dataset.kind;
