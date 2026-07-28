@@ -672,8 +672,24 @@ async function handleLogin(email, password) {
   authBusy = false;
   if (error) { authError = error.message; renderAuth(); }
 }
+// Nur @konzepthaus-consulting.com darf sich registrieren. Das ist nur die Frontend-Vorabprüfung
+// für eine sofortige, freundliche Fehlermeldung – die eigentliche Absicherung läuft serverseitig
+// über einen Datenbank-Trigger auf auth.users (siehe Einrichtungsanleitung/Migration), da der
+// anon key öffentlich ist und Registrierungen theoretisch auch direkt über die Supabase-API
+// versucht werden könnten.
+const ALLOWED_EMAIL_DOMAIN = 'konzepthaus-consulting.com';
+function isAllowedEmail(email) {
+  return (email || '').toLowerCase().trim().endsWith('@' + ALLOWED_EMAIL_DOMAIN);
+}
+
 async function handleSignup(email, password) {
-  authBusy = true; authError = ''; authInfo = ''; renderAuth();
+  authError = ''; authInfo = '';
+  if (!isAllowedEmail(email)) {
+    authError = `Registrierung ist nur mit einer @${ALLOWED_EMAIL_DOMAIN} E-Mail-Adresse möglich.`;
+    renderAuth();
+    return;
+  }
+  authBusy = true; renderAuth();
   const { data: res, error } = await sb.auth.signUp({ email, password });
   authBusy = false;
   if (error) { authError = error.message; renderAuth(); return; }
