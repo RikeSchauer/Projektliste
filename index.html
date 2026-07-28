@@ -59,6 +59,8 @@
   .badge.Pausiert { background: var(--amber-bg); color: var(--amber); }
   .badge.Beendet { background: #eee; color: #666; }
   .badge.Bevorstehend { background: var(--purple-bg); color: var(--purple); }
+  .badge.Perm { background: var(--blue-bg); color: var(--blue); }
+  .badge.Contract { background: #eee; color: #666; }
   .mini-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 6px; vertical-align: middle; }
   .mini-badge.auto { background: var(--green-bg); color: var(--green); }
   .mini-badge.manuell { background: var(--amber-bg); color: var(--amber); }
@@ -142,6 +144,7 @@ let realtimeChannel = null;
 let reportConfig = null; // { consultantId } – wenn gesetzt, wird im Provisionen-Tab die Abrechnung statt der Übersicht gezeigt
 let projFilterKunde = 'all';
 let projFilterStatus = 'all';
+let projFilterArt = 'all'; // 'all' | 'contract' | 'perm'
 let projSort = 'kunde'; // 'kunde' | 'start_asc' | 'start_desc' | 'end_asc' | 'end_desc'
 
 function currentMonthStr() {
@@ -192,15 +195,22 @@ function parseDateUTC(s) { if (!s) return null; const [y, m, d] = s.split('-').m
 function daysInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
 function monthRangeUTC(monthStr) { const [y, m] = monthStr.split('-').map(Number); return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 0)]; }
 
-// Gesamte "bestellte" Stunden über die komplette Projektlaufzeit (Wochenstunden x Wochen)
+// Gesamte "bestellte" Stunden über die komplette Projektlaufzeit (Wochenstunden x Wochen).
+// Bei Perm-Projekten (Pauschalhonorar statt Stundenabrechnung) zählt immer genau 1 Stunde,
+// damit Umsatz = Stunden x Charge/h weiterhin die volle Rechnungssumme ergibt.
 function projectTotalSollHours(p) {
+  if (p.projekttyp === 'perm') return p.start_date ? 1 : 0;
   const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
   if (ps === null || pe === null || pe < ps) return 0;
   return round1((p.wochenstunden || 0) * daysInclusive(ps, pe) / 7);
 }
 
-// Anteil der Gesamtstunden, der auf einen bestimmten Monat entfällt (nach Tagesüberlappung)
+// Anteil der Gesamtstunden, der auf einen bestimmten Monat entfällt (nach Tagesüberlappung).
+// Bei Perm-Projekten fällt die gesamte 1 Stunde in den Monat des Startdatums (= Placement-Monat).
 function projectMonthSollHours(p, monthStr) {
+  if (p.projekttyp === 'perm') {
+    return (p.start_date && p.start_date.slice(0, 7) === monthStr) ? 1 : 0;
+  }
   const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
   if (ps === null || pe === null) return 0;
   const [ms, me] = monthRangeUTC(monthStr);
@@ -210,6 +220,7 @@ function projectMonthSollHours(p, monthStr) {
 }
 
 function monthListForProject(p) {
+  if (p.projekttyp === 'perm') return p.start_date ? [p.start_date.slice(0, 7)] : [];
   if (!p.start_date || !p.end_date) return [];
   const [sy, sm] = p.start_date.split('-').map(Number);
   const [ey, em] = p.end_date.split('-').map(Number);
@@ -921,6 +932,7 @@ function filteredSortedProjects() {
   let list = data.projects.slice();
   if (projFilterKunde !== 'all') list = list.filter(p => p.kunde === projFilterKunde);
   if (projFilterStatus !== 'all') list = list.filter(p => computedStatus(p) === projFilterStatus);
+  if (projFilterArt !== 'all') list = list.filter(p => (p.projekttyp === 'perm' ? 'perm' : 'contract') === projFilterArt);
 
   const dateVal = (s, fallback) => s ? parseDateUTC(s) : fallback;
   if (projSort === 'start_asc') list.sort((a, b) => dateVal(a.start_date, Infinity) - dateVal(b.start_date, Infinity));
@@ -942,6 +954,12 @@ function projekteHTML() {
       <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
     </div>
     <div class="toolbar">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Art:</label>
+      <select id="projFilterArtSel">
+        <option value="all" ${projFilterArt === 'all' ? 'selected' : ''}>Alle</option>
+        <option value="contract" ${projFilterArt === 'contract' ? 'selected' : ''}>Contract</option>
+        <option value="perm" ${projFilterArt === 'perm' ? 'selected' : ''}>Perm</option>
+      </select>
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
       <select id="projFilterKundeSel">
         <option value="all">Alle</option>
@@ -960,21 +978,23 @@ function projekteHTML() {
         <option value="end_asc" ${projSort === 'end_asc' ? 'selected' : ''}>Ende (früh → spät)</option>
         <option value="end_desc" ${projSort === 'end_desc' ? 'selected' : ''}>Ende (spät → früh)</option>
       </select>
-      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all') ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
+      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all' || projFilterArt !== 'all') ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
     </div>
     ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
       <div class="table-scroll">
       <table class="projekte-table">
-        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
+        <thead><tr><th>Art</th><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h · Pauschale</th><th>Charge/h · Pauschale</th><th>Marge/h · Pauschale</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
         <tbody>
           ${list.map(p => {
             const st = computedStatus(p);
+            const isPerm = p.projekttyp === 'perm';
             return `
             <tr>
+              <td><span class="badge ${isPerm ? 'Perm' : 'Contract'}">${isPerm ? 'Perm' : 'Contract'}</span></td>
               <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
-              <td>${p.wochenstunden}</td>
-              <td>${fmtNum(projectTotalSollHours(p), 1)} Std.</td>
+              <td>${isPerm ? '–' : p.wochenstunden}</td>
+              <td>${isPerm ? '1 Std. (Pauschale)' : fmtNum(projectTotalSollHours(p), 1) + ' Std.'}</td>
               <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
               <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
               <td>${[p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' + ') || '–'}</td>
@@ -982,12 +1002,12 @@ function projekteHTML() {
               <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
             </tr>`;
           }).join('')}
-          ${!list.length ? '<tr><td colspan="13" class="empty">Keine Projekte für diesen Filter.</td></tr>' : ''}
+          ${!list.length ? '<tr><td colspan="14" class="empty">Keine Projekte für diesen Filter.</td></tr>' : ''}
         </tbody>
       </table>
       </div>
     </div>
-    <div class="empty" style="padding-top:0;">"Sollstunden gesamt" wird automatisch aus Start-/Enddatum und Std./Woche berechnet und im SOLL-Tab auf die Monate verteilt.</div>
+    <div class="empty" style="padding-top:0;">"Sollstunden gesamt" wird automatisch berechnet – bei Contract aus Start-/Enddatum und Std./Woche (auf die Monate verteilt), bei Perm ist es immer 1 Std. im Monat des Startdatums, damit Charge/h die volle Pauschale abbildet.</div>
     `}
   `;
 }
@@ -996,7 +1016,7 @@ function openProjectModal(id) {
   const p = id ? project(id) : null;
   modalConfig = {
     type: 'project', id: id || null,
-    values: p ? { ...p } : { kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
+    values: p ? { ...p } : { projekttyp: 'contract', kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
   };
   render();
 }
@@ -1014,6 +1034,13 @@ function renderModal() {
   overlay.innerHTML = `
     <div class="modal">
       <h3>${c.id ? 'Projekt bearbeiten' : 'Neues Projekt'}</h3>
+      <div class="field">
+        <label>Art</label>
+        <select id="f_art">
+          <option value="contract" ${v.projekttyp !== 'perm' ? 'selected' : ''}>Contract (Abrechnung nach Stunden)</option>
+          <option value="perm" ${v.projekttyp === 'perm' ? 'selected' : ''}>Perm (Pauschale / Vermittlungshonorar)</option>
+        </select>
+      </div>
       <div class="field-row">
         <div class="field"><label>Kunde</label><input type="text" id="f_kunde" value="${v.kunde || ''}"></div>
         <div class="field"><label>Contractor</label><input type="text" id="f_contractor" value="${v.contractor || ''}"></div>
@@ -1022,8 +1049,9 @@ function renderModal() {
         <div class="field"><label>Startdatum</label><input type="date" id="f_start" value="${v.start_date || ''}"></div>
         <div class="field"><label>Enddatum</label><input type="date" id="f_ende" value="${v.end_date || ''}"></div>
       </div>
+      <div class="empty" id="permEndeHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm optional – wird beim Speichern automatisch auf das Startdatum gesetzt, falls leer (= Placement-Monat).</div>
       <div class="field-row">
-        <div class="field"><label>Std./Woche</label><input type="number" id="f_wochenstunden" value="${v.wochenstunden}"></div>
+        <div class="field"><label id="f_wochenstunden_label">Std./Woche</label><input type="number" id="f_wochenstunden" value="${v.wochenstunden}"></div>
         <div class="field"><label>Status</label>
           <select id="f_status">
             <option value="auto" ${v.status !== 'Pausiert' ? 'selected' : ''}>Automatisch (aus Start-/Enddatum)</option>
@@ -1031,11 +1059,13 @@ function renderModal() {
           </select>
         </div>
       </div>
+      <div class="empty" id="permWochenHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm nicht relevant (keine Stundenabrechnung) – wird beim Speichern ignoriert.</div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Status wird normalerweise automatisch aus Start-/Enddatum erkannt (Noch nicht aktiv / Aktiv / Beendet). "Pausiert" ist die einzige manuelle Ausnahme.</div>
       <div class="field-row">
-        <div class="field"><label>Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
-        <div class="field"><label>Charge / h (Umsatz)</label><input type="number" id="f_chargeH" value="${v.charge_h}"></div>
+        <div class="field"><label id="f_payH_label">Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
+        <div class="field"><label id="f_chargeH_label">Charge / h (Umsatz)</label><input type="number" id="f_chargeH" value="${v.charge_h}"></div>
       </div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Bei Perm: hier die volle Rechnungssumme (z.B. 15000) bei Charge eintragen – die Stundenanzahl wird automatisch auf 1 gesetzt, damit die gesamte Pauschale als Umsatz/Rohertrag gezählt wird.</div>
       <div class="field-row">
         <div class="field"><label>Consultant 1</label><select id="f_consultant1">${consultantOptionsHTML(v.consultant1_id)}</select></div>
         <div class="field"><label>Consultant 2 (optional)</label><select id="f_consultant2">${consultantOptionsHTML(v.consultant2_id)}</select></div>
@@ -1047,15 +1077,40 @@ function renderModal() {
       </div>
     </div>`;
   document.getElementById('app').appendChild(overlay);
+
+  const artSel = document.getElementById('f_art');
+  const wochenInput = document.getElementById('f_wochenstunden');
+  const permEndeHint = document.getElementById('permEndeHint');
+  const permWochenHint = document.getElementById('permWochenHint');
+  const wochenLabel = document.getElementById('f_wochenstunden_label');
+  const payLabel = document.getElementById('f_payH_label');
+  const chargeLabel = document.getElementById('f_chargeH_label');
+  function applyArtUI() {
+    const isPerm = artSel.value === 'perm';
+    wochenInput.disabled = isPerm;
+    wochenLabel.textContent = isPerm ? 'Std./Woche (n/a bei Perm)' : 'Std./Woche';
+    payLabel.textContent = isPerm ? 'Kosten gesamt (Pauschale)' : 'Pay / h (Kosten)';
+    chargeLabel.textContent = isPerm ? 'Rechnungsbetrag (Pauschale)' : 'Charge / h (Umsatz)';
+    permEndeHint.style.display = isPerm ? '' : 'none';
+    permWochenHint.style.display = isPerm ? '' : 'none';
+  }
+  artSel.addEventListener('change', applyArtUI);
+  applyArtUI();
+
   document.getElementById('modalCancel').addEventListener('click', () => { modalConfig = null; render(); });
   if (c.id) document.getElementById('modalDelete').addEventListener('click', () => deleteProject(c.id));
   document.getElementById('modalSave').addEventListener('click', async () => {
+    const isPerm = document.getElementById('f_art').value === 'perm';
+    const startDate = document.getElementById('f_start').value || null;
+    let endDate = document.getElementById('f_ende').value || null;
+    if (isPerm && !endDate) endDate = startDate;
     const payload = {
+      projekttyp: isPerm ? 'perm' : 'contract',
       kunde: document.getElementById('f_kunde').value.trim(),
       contractor: document.getElementById('f_contractor').value.trim(),
-      start_date: document.getElementById('f_start').value || null,
-      end_date: document.getElementById('f_ende').value || null,
-      wochenstunden: Number(document.getElementById('f_wochenstunden').value) || 0,
+      start_date: startDate,
+      end_date: endDate,
+      wochenstunden: isPerm ? 0 : (Number(document.getElementById('f_wochenstunden').value) || 0),
       pay_h: Number(document.getElementById('f_payH').value) || 0,
       charge_h: Number(document.getElementById('f_chargeH').value) || 0,
       status: document.getElementById('f_status').value === 'Pausiert' ? 'Pausiert' : 'Auto',
@@ -1160,10 +1215,12 @@ function wireTabEvents() {
   if (projFilterKundeSel) projFilterKundeSel.addEventListener('change', () => { projFilterKunde = projFilterKundeSel.value; render(); });
   const projFilterStatusSel = document.getElementById('projFilterStatusSel');
   if (projFilterStatusSel) projFilterStatusSel.addEventListener('change', () => { projFilterStatus = projFilterStatusSel.value; render(); });
+  const projFilterArtSel = document.getElementById('projFilterArtSel');
+  if (projFilterArtSel) projFilterArtSel.addEventListener('change', () => { projFilterArt = projFilterArtSel.value; render(); });
   const projSortSel = document.getElementById('projSortSel');
   if (projSortSel) projSortSel.addEventListener('change', () => { projSort = projSortSel.value; render(); });
   const projFilterResetBtn = document.getElementById('projFilterResetBtn');
-  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; render(); });
+  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; projFilterArt = 'all'; render(); });
   ['soll', 'ist'].forEach(kind => {
     const picker = document.getElementById('monthPicker_' + kind);
     if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
