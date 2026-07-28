@@ -17,7 +17,7 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
-  #app { max-width: 1500px; margin: 0 auto; padding: 20px 24px 60px; }
+  #app { max-width: 1900px; margin: 0 auto; padding: 20px 24px 60px; }
   header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
   h1 { font-size: 20px; margin: 0; font-weight: 700; }
   .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
@@ -65,6 +65,11 @@
   .mini-badge.auto { background: var(--green-bg); color: var(--green); }
   .mini-badge.manuell { background: var(--amber-bg); color: var(--amber); }
   .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .toolbar-filters { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: nowrap; }
+  .toolbar-filters > * { flex: 0 0 auto; }
+  .toolbar-filters label { white-space: nowrap; }
+  .toolbar-filters select { padding: 7px 6px; }
+  .toolbar-filters input[type=month] { padding: 7px 6px; }
   select, input[type=text], input[type=number], input[type=date], input[type=month], input[type=email], input[type=password] {
     font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text);
   }
@@ -147,6 +152,7 @@ let projFilterStatus = 'all';
 let projFilterArt = 'all'; // 'all' | 'contract' | 'perm'
 let projFilterStartMonat = ''; // 'YYYY-MM' oder '' = kein Filter
 let projFilterEndeMonat = ''; // 'YYYY-MM' oder '' = kein Filter
+let projSearch = ''; // Freitext-Suche über alle Spalten der Projekte-Tabelle (wie in Excel)
 let projSort = 'kunde'; // 'kunde' | 'start_asc' | 'start_desc' | 'end_asc' | 'end_desc'
 
 function currentMonthStr() {
@@ -928,6 +934,28 @@ function setupChart() {
 
 // ---------- PROJEKTE ----------
 
+// Baut einen durchsuchbaren Text aus genau den Werten, die auch in der Projekte-Tabelle
+// angezeigt werden (Art, Kunde, Contractor, Daten, Zahlen, Consultants, Status) – so findet
+// die Suche wie in Excel jedes Wort, das irgendwo in der Zeile sichtbar ist.
+function projectSearchText(p) {
+  const isPerm = p.projekttyp === 'perm';
+  return [
+    isPerm ? 'Perm' : 'Contract',
+    p.kunde,
+    p.contractor,
+    fmtDate(p.start_date),
+    fmtDate(p.end_date),
+    isPerm ? '' : p.wochenstunden,
+    isPerm ? '1 Std. Pauschale' : fmtNum(projectTotalSollHours(p), 1),
+    fmtEUR(p.pay_h),
+    fmtEUR(p.charge_h),
+    fmtEUR(margeH(p)),
+    fmtPct(margePct(p)),
+    [p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' '),
+    computedStatus(p),
+  ].join(' ').toLowerCase();
+}
+
 // Sortiert und filtert die Projektliste für die Projekte-Ansicht. Kunden werden dabei
 // immer alphabetisch einsortiert (bzw. per Sortier-Dropdown auch nach Start/Ende).
 function filteredSortedProjects() {
@@ -937,6 +965,10 @@ function filteredSortedProjects() {
   if (projFilterArt !== 'all') list = list.filter(p => (p.projekttyp === 'perm' ? 'perm' : 'contract') === projFilterArt);
   if (projFilterStartMonat) list = list.filter(p => p.start_date && p.start_date.slice(0, 7) === projFilterStartMonat);
   if (projFilterEndeMonat) list = list.filter(p => p.end_date && p.end_date.slice(0, 7) === projFilterEndeMonat);
+  if (projSearch.trim()) {
+    const q = projSearch.trim().toLowerCase();
+    list = list.filter(p => projectSearchText(p).includes(q));
+  }
 
   const dateVal = (s, fallback) => s ? parseDateUTC(s) : fallback;
   if (projSort === 'start_asc') list.sort((a, b) => dateVal(a.start_date, Infinity) - dateVal(b.start_date, Infinity));
@@ -953,11 +985,15 @@ function projekteHTML() {
   const list = filteredSortedProjects();
 
   return `
+    <div class="toolbar" style="margin-bottom:10px;">
+      <input type="text" id="projSearchInput" placeholder="🔍 Suchen (Kunde, Contractor, Consultant, Status, Zahlen …)" style="width:340px;" value="${projSearch}">
+      ${projSearch ? '<button class="btn" id="projSearchClearBtn">✕ Suche leeren</button>' : ''}
+    </div>
     <div class="toolbar">
       <button class="btn primary" id="addProjectBtn">+ Neues Projekt</button>
       <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
     </div>
-    <div class="toolbar">
+    <div class="toolbar-filters">
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Art:</label>
       <select id="projFilterArtSel">
         <option value="all" ${projFilterArt === 'all' ? 'selected' : ''}>Alle</option>
@@ -976,17 +1012,17 @@ function projekteHTML() {
       </select>
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Sortieren:</label>
       <select id="projSortSel">
-        <option value="kunde" ${projSort === 'kunde' ? 'selected' : ''}>Kunde (A–Z)</option>
-        <option value="start_asc" ${projSort === 'start_asc' ? 'selected' : ''}>Start (früh → spät)</option>
-        <option value="start_desc" ${projSort === 'start_desc' ? 'selected' : ''}>Start (spät → früh)</option>
-        <option value="end_asc" ${projSort === 'end_asc' ? 'selected' : ''}>Ende (früh → spät)</option>
-        <option value="end_desc" ${projSort === 'end_desc' ? 'selected' : ''}>Ende (spät → früh)</option>
+        <option value="kunde" ${projSort === 'kunde' ? 'selected' : ''}>Kunde A–Z</option>
+        <option value="start_asc" ${projSort === 'start_asc' ? 'selected' : ''}>Start ↑</option>
+        <option value="start_desc" ${projSort === 'start_desc' ? 'selected' : ''}>Start ↓</option>
+        <option value="end_asc" ${projSort === 'end_asc' ? 'selected' : ''}>Ende ↑</option>
+        <option value="end_desc" ${projSort === 'end_desc' ? 'selected' : ''}>Ende ↓</option>
       </select>
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Start im Monat:</label>
       <input type="month" id="projFilterStartMonatInput" value="${projFilterStartMonat}">
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Ende im Monat:</label>
       <input type="month" id="projFilterEndeMonatInput" value="${projFilterEndeMonat}">
-      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all' || projFilterArt !== 'all' || projFilterStartMonat || projFilterEndeMonat) ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
+      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all' || projFilterArt !== 'all' || projFilterStartMonat || projFilterEndeMonat || projSearch) ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
     </div>
     ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
@@ -1235,7 +1271,25 @@ function wireTabEvents() {
   const projSortSel = document.getElementById('projSortSel');
   if (projSortSel) projSortSel.addEventListener('change', () => { projSort = projSortSel.value; render(); });
   const projFilterResetBtn = document.getElementById('projFilterResetBtn');
-  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; projFilterArt = 'all'; projFilterStartMonat = ''; projFilterEndeMonat = ''; render(); });
+  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; projFilterArt = 'all'; projFilterStartMonat = ''; projFilterEndeMonat = ''; projSearch = ''; render(); });
+  const projSearchInput = document.getElementById('projSearchInput');
+  if (projSearchInput) {
+    // Live-Filterung bei jedem Tastendruck (wie in Excel). Da render() die gesamte Tab-HTML
+    // neu aufbaut, geht der Fokus sonst nach jedem Zeichen verloren – deshalb Fokus/Cursor
+    // direkt nach dem Neu-Rendern wiederherstellen.
+    projSearchInput.addEventListener('input', () => {
+      projSearch = projSearchInput.value;
+      render();
+      const freshInput = document.getElementById('projSearchInput');
+      if (freshInput) {
+        freshInput.focus();
+        const pos = freshInput.value.length;
+        freshInput.setSelectionRange(pos, pos);
+      }
+    });
+  }
+  const projSearchClearBtn = document.getElementById('projSearchClearBtn');
+  if (projSearchClearBtn) projSearchClearBtn.addEventListener('click', () => { projSearch = ''; render(); });
   ['soll', 'ist'].forEach(kind => {
     const picker = document.getElementById('monthPicker_' + kind);
     if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
