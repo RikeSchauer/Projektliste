@@ -145,6 +145,8 @@ let reportConfig = null; // { consultantId } – wenn gesetzt, wird im Provision
 let projFilterKunde = 'all';
 let projFilterStatus = 'all';
 let projFilterArt = 'all'; // 'all' | 'contract' | 'perm'
+let projFilterStartMonat = ''; // 'YYYY-MM' oder '' = kein Filter
+let projFilterEndeMonat = ''; // 'YYYY-MM' oder '' = kein Filter
 let projSort = 'kunde'; // 'kunde' | 'start_asc' | 'start_desc' | 'end_asc' | 'end_desc'
 
 function currentMonthStr() {
@@ -933,6 +935,8 @@ function filteredSortedProjects() {
   if (projFilterKunde !== 'all') list = list.filter(p => p.kunde === projFilterKunde);
   if (projFilterStatus !== 'all') list = list.filter(p => computedStatus(p) === projFilterStatus);
   if (projFilterArt !== 'all') list = list.filter(p => (p.projekttyp === 'perm' ? 'perm' : 'contract') === projFilterArt);
+  if (projFilterStartMonat) list = list.filter(p => p.start_date && p.start_date.slice(0, 7) === projFilterStartMonat);
+  if (projFilterEndeMonat) list = list.filter(p => p.end_date && p.end_date.slice(0, 7) === projFilterEndeMonat);
 
   const dateVal = (s, fallback) => s ? parseDateUTC(s) : fallback;
   if (projSort === 'start_asc') list.sort((a, b) => dateVal(a.start_date, Infinity) - dateVal(b.start_date, Infinity));
@@ -978,7 +982,13 @@ function projekteHTML() {
         <option value="end_asc" ${projSort === 'end_asc' ? 'selected' : ''}>Ende (früh → spät)</option>
         <option value="end_desc" ${projSort === 'end_desc' ? 'selected' : ''}>Ende (spät → früh)</option>
       </select>
-      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all' || projFilterArt !== 'all') ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
+    </div>
+    <div class="toolbar">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Start im Monat:</label>
+      <input type="month" id="projFilterStartMonatInput" value="${projFilterStartMonat}">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Ende im Monat:</label>
+      <input type="month" id="projFilterEndeMonatInput" value="${projFilterEndeMonat}">
+      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all' || projFilterArt !== 'all' || projFilterStartMonat || projFilterEndeMonat) ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
     </div>
     ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
@@ -1051,7 +1061,7 @@ function renderModal() {
       </div>
       <div class="empty" id="permEndeHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm optional – wird beim Speichern automatisch auf das Startdatum gesetzt, falls leer (= Placement-Monat).</div>
       <div class="field-row">
-        <div class="field"><label id="f_wochenstunden_label">Std./Woche</label><input type="number" id="f_wochenstunden" value="${v.wochenstunden}"></div>
+        <div class="field"><label id="f_wochenstunden_label">Std./Woche</label><input type="number" step="0.5" min="0" id="f_wochenstunden" value="${v.wochenstunden}"></div>
         <div class="field"><label>Status</label>
           <select id="f_status">
             <option value="auto" ${v.status !== 'Pausiert' ? 'selected' : ''}>Automatisch (aus Start-/Enddatum)</option>
@@ -1060,6 +1070,7 @@ function renderModal() {
         </div>
       </div>
       <div class="empty" id="permWochenHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm nicht relevant (keine Stundenabrechnung) – wird beim Speichern ignoriert.</div>
+      <div class="empty" id="wochenFreitextHint" style="text-align:left;padding:0 0 8px;">40 ist nur ein Vorschlag – hier frei pro Freelancer anpassbar (z.B. 20 oder 30 bei Teilzeit).</div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Status wird normalerweise automatisch aus Start-/Enddatum erkannt (Noch nicht aktiv / Aktiv / Beendet). "Pausiert" ist die einzige manuelle Ausnahme.</div>
       <div class="field-row">
         <div class="field"><label id="f_payH_label">Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
@@ -1082,6 +1093,7 @@ function renderModal() {
   const wochenInput = document.getElementById('f_wochenstunden');
   const permEndeHint = document.getElementById('permEndeHint');
   const permWochenHint = document.getElementById('permWochenHint');
+  const wochenFreitextHint = document.getElementById('wochenFreitextHint');
   const wochenLabel = document.getElementById('f_wochenstunden_label');
   const payLabel = document.getElementById('f_payH_label');
   const chargeLabel = document.getElementById('f_chargeH_label');
@@ -1093,6 +1105,7 @@ function renderModal() {
     chargeLabel.textContent = isPerm ? 'Rechnungsbetrag (Pauschale)' : 'Charge / h (Umsatz)';
     permEndeHint.style.display = isPerm ? '' : 'none';
     permWochenHint.style.display = isPerm ? '' : 'none';
+    wochenFreitextHint.style.display = isPerm ? 'none' : '';
   }
   artSel.addEventListener('change', applyArtUI);
   applyArtUI();
@@ -1217,10 +1230,14 @@ function wireTabEvents() {
   if (projFilterStatusSel) projFilterStatusSel.addEventListener('change', () => { projFilterStatus = projFilterStatusSel.value; render(); });
   const projFilterArtSel = document.getElementById('projFilterArtSel');
   if (projFilterArtSel) projFilterArtSel.addEventListener('change', () => { projFilterArt = projFilterArtSel.value; render(); });
+  const projFilterStartMonatInput = document.getElementById('projFilterStartMonatInput');
+  if (projFilterStartMonatInput) projFilterStartMonatInput.addEventListener('change', () => { projFilterStartMonat = projFilterStartMonatInput.value; render(); });
+  const projFilterEndeMonatInput = document.getElementById('projFilterEndeMonatInput');
+  if (projFilterEndeMonatInput) projFilterEndeMonatInput.addEventListener('change', () => { projFilterEndeMonat = projFilterEndeMonatInput.value; render(); });
   const projSortSel = document.getElementById('projSortSel');
   if (projSortSel) projSortSel.addEventListener('change', () => { projSort = projSortSel.value; render(); });
   const projFilterResetBtn = document.getElementById('projFilterResetBtn');
-  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; projFilterArt = 'all'; render(); });
+  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; projFilterArt = 'all'; projFilterStartMonat = ''; projFilterEndeMonat = ''; render(); });
   ['soll', 'ist'].forEach(kind => {
     const picker = document.getElementById('monthPicker_' + kind);
     if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
