@@ -17,7 +17,7 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
-  #app { max-width: 1180px; margin: 0 auto; padding: 20px 24px 60px; }
+  #app { max-width: 1500px; margin: 0 auto; padding: 20px 24px 60px; }
   header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
   h1 { font-size: 20px; margin: 0; font-weight: 700; }
   .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
@@ -44,6 +44,12 @@
   th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .02em; }
   tbody tr:hover { background: #fafbff; }
+  table.projekte-table { font-size: 12.5px; }
+  table.projekte-table th, table.projekte-table td { padding: 7px 8px; }
+  table.projekte-table th:last-child, table.projekte-table td:last-child {
+    position: sticky; right: 0; background: var(--card); box-shadow: -6px 0 6px -6px rgba(0,0,0,.12);
+  }
+  table.projekte-table tbody tr:hover td:last-child { background: #fafbff; }
   tr.inactive { opacity: .4; }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
   .badge.Gut { background: var(--green-bg); color: var(--green); }
@@ -733,8 +739,8 @@ function projekteHTML() {
     ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
       <div class="table-scroll">
-      <table>
-        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th></th></tr></thead>
+      <table class="projekte-table">
+        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
         <tbody>
           ${data.projects.map(p => `
             <tr>
