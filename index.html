@@ -374,6 +374,29 @@ function provisionenHTML() {
     </div>
 
     <div class="card panel">
+      <h2>Rohertrag pro Mitarbeiter</h2>
+      <div class="empty" style="padding-top:0;text-align:left;">Rohertrag (Stunden × Marge/h) je Consultant – Basis für alle Provisionen, inkl. Chaks 5%-Team-Berechnung. Bei geteilten Projekten (2 Consultants) wird der Rohertrag jeweils zur Hälfte angerechnet.</div>
+      ${!data.consultants.length ? '<div class="empty">Noch keine Consultants angelegt.</div>' : `
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Consultant</th><th>Team</th><th>Rohertrag ${monthLabel(provMonth)}</th><th>Rohertrag ${quarterLabel(qYear, qNum)}</th></tr></thead>
+        <tbody>
+          ${data.consultants.map(c => {
+            const revMonth = attributedRevenue(c.id, monthEntries);
+            const revQuarter = attributedRevenue(c.id, qEntries);
+            return `<tr>
+              <td><strong>${c.name}</strong>${c.is_team_lead ? ' <span class="badge Aktiv">Team-Lead</span>' : ''}</td>
+              <td>${c.team_lead_id ? consultantName(c.team_lead_id) : '–'}</td>
+              <td>${fmtEUR(revMonth)}</td>
+              <td>${fmtEUR(revQuarter)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      </div>`}
+    </div>
+
+    <div class="card panel">
       <h2>Team-Provision (Quartal) – ${quarterLabel(qYear, qNum)}</h2>
       <div class="empty" style="padding-top:0;text-align:left;">Team-Leads erhalten statt der monatlichen 15% einen eigenen Satz auf den IST-Rohertrag ihres gesamten Teams, summiert über das Quartal (${qMonths.map(monthLabel).join(', ')}).</div>
       ${!teamLeads.length ? '<div class="empty">Kein Team-Lead angelegt.</div>' : `
