@@ -1,0 +1,601 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projektliste – Freelancer Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f6fb; --card: #ffffff; --border: #e3e7ef; --text: #1f2430; --muted: #6b7280;
+    --blue: #2563eb; --blue-bg: #eaf0fe;
+    --teal: #0d9488; --teal-bg: #e6f7f5;
+    --purple: #7c3aed; --purple-bg: #f2ebfe;
+    --amber: #b45309; --amber-bg: #fef3e2;
+    --green: #15803d; --green-bg: #e8f7ec;
+    --red: #b91c1c; --red-bg: #fdeaea;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+  #app { max-width: 1180px; margin: 0 auto; padding: 20px 24px 60px; }
+  header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+  .userbar { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+  nav.tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  nav.tabs button { background: none; border: none; padding: 10px 16px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  nav.tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
+  nav.tabs button:hover { color: var(--text); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(20,20,43,.03); }
+  .grid-kpi { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+  @media (max-width: 900px) { .grid-kpi { grid-template-columns: repeat(2, 1fr); } }
+  .kpi { border-radius: 12px; padding: 14px 16px; border: 1px solid var(--border); }
+  .kpi .label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+  .kpi .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .kpi .hint { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .kpi.blue { background: var(--blue-bg); } .kpi.blue .value { color: var(--blue); }
+  .kpi.teal { background: var(--teal-bg); } .kpi.teal .value { color: var(--teal); }
+  .kpi.purple { background: var(--purple-bg); } .kpi.purple .value { color: var(--purple); }
+  .kpi.amber { background: var(--amber-bg); } .kpi.amber .value { color: var(--amber); }
+  section.panel { margin-bottom: 22px; }
+  section.panel h2 { font-size: 15px; margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .02em; }
+  tbody tr:hover { background: #fafbff; }
+  tr.inactive { opacity: .4; }
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .badge.Gut { background: var(--green-bg); color: var(--green); }
+  .badge.Achtung { background: var(--amber-bg); color: var(--amber); }
+  .badge.Kritisch { background: var(--red-bg); color: var(--red); }
+  .badge.Aktiv { background: var(--green-bg); color: var(--green); }
+  .badge.Pausiert { background: var(--amber-bg); color: var(--amber); }
+  .badge.Beendet { background: #eee; color: #666; }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  select, input[type=text], input[type=number], input[type=date], input[type=month], input[type=email], input[type=password] {
+    font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text);
+  }
+  input.num-cell { width: 90px; padding: 5px 7px; }
+  button.btn { font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; cursor: pointer; color: var(--text); }
+  button.btn:hover { background: #f2f4f9; }
+  button.btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+  button.btn.primary:hover { background: #1d4ed8; }
+  button.btn.danger { color: var(--red); }
+  button.link { background: none; border: none; color: var(--blue); font-size: 12.5px; cursor: pointer; padding: 2px 4px; font-weight: 600; }
+  button.link.danger { color: var(--red); }
+  .chart-wrap { position: relative; height: 280px; }
+  .overlay { position: fixed; inset: 0; background: rgba(20,20,43,.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal { background: #fff; border-radius: 14px; padding: 22px 24px; width: 460px; max-width: 92vw; max-height: 88vh; overflow: auto; }
+  .modal h3 { margin: 0 0 14px; font-size: 16px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+  .field input, .field select { width: 100%; }
+  .field-row { display: flex; gap: 10px; }
+  .field-row .field { flex: 1; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
+  footer.hint { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 24px; }
+  .auth-wrap { max-width: 380px; margin: 80px auto; }
+  .auth-wrap h1 { text-align: center; margin-bottom: 4px; }
+  .auth-wrap p.sub { text-align: center; margin-bottom: 20px; }
+  .auth-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .auth-tabs button { flex: 1; }
+  .banner { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
+  .banner.error { background: var(--red-bg); color: var(--red); }
+  .banner.info { background: var(--blue-bg); color: var(--blue); }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- Supabase JS Client -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js"></script>
+
+<script>
+/* ============================================================
+   1) HIER EINTRAGEN — Supabase-Zugangsdaten
+   Zu finden in Supabase: Project Settings -> API
+   ============================================================ */
+const SUPABASE_URL = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVldmVmbXZicHpudnV2aHZrZHdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyMjUzMTYsImV4cCI6MjEwMDgwMTMxNn0.ewGSI6UcXpInCL1z9VTqcqsGxBPd5Aqt4YUMulrml5E';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVldmVmbXZicHpudnV2aHZrZHdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyMjUzMTYsImV4cCI6MjEwMDgwMTMxNn0.ewGSI6UcXpInCL1z9VTqcqsGxBPd5Aqt4YUMulrml5E';
+/* ============================================================ */
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+const MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
+
+let session = null;
+let authMode = 'login'; // 'login' | 'signup'
+let authError = '';
+let authInfo = '';
+let authBusy = false;
+
+let data = { projects: [], entries: [] };
+let activeTab = 'dashboard';
+let dashMonth = 'all';
+let sollMonth = currentMonthStr();
+let istMonth = currentMonthStr();
+let trendMetric = 'umsatz';
+let trendChart = null;
+let modalConfig = null;
+let realtimeChannel = null;
+
+function currentMonthStr() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+function fmtEUR(n) { return (n || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }); }
+function fmtNum(n, digits) { return (n || 0).toLocaleString('de-DE', { maximumFractionDigits: digits ?? 1 }); }
+function fmtPct(n) { return ((n || 0) * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + '%'; }
+function fmtDate(s) { if (!s) return '–'; const [y,m,d] = s.split('-'); return `${d}.${m}.${y}`; }
+
+function project(id) { return data.projects.find(p => p.id === id); }
+function margeH(p) { return (p.charge_h || 0) - (p.pay_h || 0); }
+function margePct(p) { return p.charge_h ? margeH(p) / p.charge_h : 0; }
+
+function isActiveInMonth(p, monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  const monthStart = new Date(y, m - 1, 1);
+  const monthEnd = new Date(y, m, 0);
+  const start = p.start_date ? new Date(p.start_date) : null;
+  const ende = p.end_date ? new Date(p.end_date) : null;
+  if (start && start > monthEnd) return false;
+  if (ende && ende < monthStart) return false;
+  return true;
+}
+
+function computeEntry(e) {
+  const p = project(e.project_id);
+  const chargeH = p ? p.charge_h : 0;
+  const payH = p ? p.pay_h : 0;
+  const stunden = e.stunden || 0;
+  const umsatz = stunden * chargeH;
+  const kosten = stunden * payH;
+  return { stunden, umsatz, kosten, rohertrag: umsatz - kosten };
+}
+function sumEntries(list) {
+  return list.reduce((acc, e) => {
+    const c = computeEntry(e);
+    acc.stunden += c.stunden; acc.umsatz += c.umsatz; acc.kosten += c.kosten; acc.rohertrag += c.rohertrag;
+    return acc;
+  }, { stunden: 0, umsatz: 0, kosten: 0, rohertrag: 0 });
+}
+function entriesOf(kind) { return data.entries.filter(e => e.kind === kind); }
+function allMonthsUsed() {
+  const set = new Set();
+  data.entries.forEach(e => set.add(e.month));
+  set.add(currentMonthStr());
+  return Array.from(set).sort();
+}
+function statusFromErf(erf, hasSoll) {
+  if (!hasSoll) return null;
+  if (erf >= 0.9) return 'Gut';
+  if (erf >= 0.8) return 'Achtung';
+  return 'Kritisch';
+}
+function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return MONTH_NAMES[mo - 1] + ' ' + y; }
+
+// ---------- DATA LOADING ----------
+
+async function loadAll() {
+  const [{ data: projects, error: e1 }, { data: entries, error: e2 }] = await Promise.all([
+    sb.from('projects').select('*').order('created_at'),
+    sb.from('entries').select('*'),
+  ]);
+  if (e1 || e2) {
+    console.error('load error', e1, e2);
+    renderError((e1 || e2).message);
+    return;
+  }
+  data.projects = projects || [];
+  data.entries = entries || [];
+  render();
+}
+
+function subscribeRealtime() {
+  if (realtimeChannel) return;
+  realtimeChannel = sb.channel('public:all-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'projects' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, () => loadAll())
+    .subscribe();
+}
+
+// ---------- AUTH ----------
+
+async function handleLogin(email, password) {
+  authBusy = true; authError = ''; renderAuth();
+  const { error } = await sb.auth.signInWithPassword({ email, password });
+  authBusy = false;
+  if (error) { authError = error.message; renderAuth(); }
+}
+async function handleSignup(email, password) {
+  authBusy = true; authError = ''; authInfo = ''; renderAuth();
+  const { data: res, error } = await sb.auth.signUp({ email, password });
+  authBusy = false;
+  if (error) { authError = error.message; renderAuth(); return; }
+  if (res.session) return; // logged in immediately (email confirmation disabled)
+  authInfo = 'Konto erstellt. Falls E-Mail-Bestätigung aktiviert ist, bitte den Link in deinem Postfach öffnen und dich danach anmelden.';
+  authMode = 'login';
+  renderAuth();
+}
+async function handleLogout() {
+  await sb.auth.signOut();
+}
+
+// ---------- RENDER: AUTH SCREEN ----------
+
+function renderAuth() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="auth-wrap">
+      <h1>Projektliste</h1>
+      <p class="sub">Freelancer-Dashboard – gemeinsam bearbeitet</p>
+      <div class="card">
+        <div class="auth-tabs">
+          <button class="btn ${authMode === 'login' ? 'primary' : ''}" id="tabLogin">Anmelden</button>
+          <button class="btn ${authMode === 'signup' ? 'primary' : ''}" id="tabSignup">Registrieren</button>
+        </div>
+        ${authError ? `<div class="banner error">${authError}</div>` : ''}
+        ${authInfo ? `<div class="banner info">${authInfo}</div>` : ''}
+        <div class="field"><label>E-Mail</label><input type="email" id="authEmail"></div>
+        <div class="field"><label>Passwort</label><input type="password" id="authPassword"></div>
+        <button class="btn primary" id="authSubmit" style="width:100%;" ${authBusy ? 'disabled' : ''}>
+          ${authBusy ? '…' : (authMode === 'login' ? 'Anmelden' : 'Konto erstellen')}
+        </button>
+      </div>
+    </div>
+  `;
+  document.getElementById('tabLogin').addEventListener('click', () => { authMode = 'login'; authError=''; authInfo=''; renderAuth(); });
+  document.getElementById('tabSignup').addEventListener('click', () => { authMode = 'signup'; authError=''; authInfo=''; renderAuth(); });
+  document.getElementById('authSubmit').addEventListener('click', () => {
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    if (!email || !password) { authError = 'Bitte E-Mail und Passwort ausfüllen.'; renderAuth(); return; }
+    if (authMode === 'login') handleLogin(email, password); else handleSignup(email, password);
+  });
+}
+
+function renderError(msg) {
+  document.getElementById('app').innerHTML = `
+    <div class="auth-wrap">
+      <div class="banner error">
+        Verbindung zur Datenbank fehlgeschlagen: ${msg}<br><br>
+        Prüfe, ob SUPABASE_URL und SUPABASE_ANON_KEY am Anfang der index.html korrekt eingetragen sind
+        und ob das SQL-Setup (schema.sql) im Supabase-Projekt ausgeführt wurde.
+      </div>
+    </div>`;
+}
+
+// ---------- RENDER: APP ----------
+
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <header class="top">
+      <div>
+        <h1>Projektliste – Freelancer Dashboard</h1>
+        <div class="sub">Projekte, SOLL/IST-Erfassung &amp; Kennzahlen – live geteilt im Team</div>
+      </div>
+      <div class="userbar">
+        <span>${session.user.email}</span>
+        <button class="btn" id="logoutBtn">Abmelden</button>
+      </div>
+    </header>
+    <nav class="tabs">
+      <button data-tab="dashboard" class="${activeTab === 'dashboard' ? 'active' : ''}">Dashboard</button>
+      <button data-tab="projekte" class="${activeTab === 'projekte' ? 'active' : ''}">Projekte</button>
+      <button data-tab="soll" class="${activeTab === 'soll' ? 'active' : ''}">SOLL</button>
+      <button data-tab="ist" class="${activeTab === 'ist' ? 'active' : ''}">IST</button>
+    </nav>
+    <div id="tab-content"></div>
+    <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
+  `;
+  document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+  app.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { activeTab = b.dataset.tab; render(); }));
+
+  const content = document.getElementById('tab-content');
+  if (activeTab === 'dashboard') content.innerHTML = dashboardHTML();
+  else if (activeTab === 'projekte') content.innerHTML = projekteHTML();
+  else if (activeTab === 'soll') content.innerHTML = monthEntryHTML('soll');
+  else if (activeTab === 'ist') content.innerHTML = monthEntryHTML('ist');
+
+  wireTabEvents();
+  if (activeTab === 'dashboard') setupChart();
+  if (modalConfig) renderModal();
+}
+
+// ---------- DASHBOARD ----------
+
+function dashboardHTML() {
+  const months = allMonthsUsed();
+  const sollAll = entriesOf('soll');
+  const istAll = entriesOf('ist');
+  const sollEntries = dashMonth === 'all' ? sollAll : sollAll.filter(e => e.month === dashMonth);
+  const istEntries = dashMonth === 'all' ? istAll : istAll.filter(e => e.month === dashMonth);
+  const soll = sumEntries(sollEntries);
+  const ist = sumEntries(istEntries);
+
+  const aktiveFreelancer = data.projects.filter(p => p.status === 'Aktiv').length;
+  const margen = data.projects.map(margeH).filter(v => v > 0);
+  const avgMargeH = margen.length ? margen.reduce((a, b) => a + b, 0) / margen.length : 0;
+  const margeGesamtFaktor = ist.kosten > 0 ? ist.umsatz / ist.kosten : 0;
+
+  const erfStunden = soll.stunden > 0 ? ist.stunden / soll.stunden : 0;
+  const erfUmsatz = soll.umsatz > 0 ? ist.umsatz / soll.umsatz : 0;
+  const erfRohertrag = soll.rohertrag > 0 ? ist.rohertrag / soll.rohertrag : 0;
+
+  const rows = [
+    { label: 'Stunden', soll: soll.stunden, ist: ist.stunden, erf: erfStunden, fmt: v => fmtNum(v, 0) + ' Std.' },
+    { label: 'Umsatz', soll: soll.umsatz, ist: ist.umsatz, erf: erfUmsatz, fmt: fmtEUR },
+    { label: 'Rohertrag', soll: soll.rohertrag, ist: ist.rohertrag, erf: erfRohertrag, fmt: fmtEUR },
+  ];
+
+  const monthOptions = ['<option value="all">Alle Monate</option>']
+    .concat(months.map(m => `<option value="${m}" ${dashMonth === m ? 'selected' : ''}>${monthLabel(m)}</option>`)).join('');
+
+  return `
+    <div class="toolbar">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Zeitraum:</label>
+      <select id="dashMonthSel">${monthOptions}</select>
+    </div>
+    <div class="grid-kpi">
+      <div class="kpi purple"><div class="label">Aktive Freelancer</div><div class="value">${aktiveFreelancer}</div><div class="hint">von ${data.projects.length} Projekten gesamt</div></div>
+      <div class="kpi amber"><div class="label">Ø Marge / Std.</div><div class="value">${fmtEUR(avgMargeH)}</div><div class="hint">über alle aktiven Sätze</div></div>
+      <div class="kpi blue"><div class="label">Umsatz / Kosten-Faktor (IST)</div><div class="value">${fmtNum(margeGesamtFaktor, 2)}×</div><div class="hint">IST-Umsatz ÷ IST-Kosten</div></div>
+      <div class="kpi teal"><div class="label">Erfüllung Umsatz</div><div class="value">${fmtPct(erfUmsatz)}</div><div class="hint">IST ÷ SOLL</div></div>
+    </div>
+    <div class="card panel">
+      <h2>SOLL / IST Vergleich</h2>
+      <table>
+        <thead><tr><th>Bereich</th><th>SOLL</th><th>IST</th><th>Abweichung</th><th>Erfüllung</th><th>Status</th></tr></thead>
+        <tbody>
+          ${rows.map(r => {
+            const abw = r.ist - r.soll;
+            const st = statusFromErf(r.erf, r.soll > 0);
+            return `<tr>
+              <td><strong>${r.label}</strong></td>
+              <td>${r.fmt(r.soll)}</td>
+              <td>${r.fmt(r.ist)}</td>
+              <td style="color:${abw < 0 ? 'var(--red)' : 'var(--green)'}">${abw >= 0 ? '+' : ''}${r.fmt(abw)}</td>
+              <td>${r.soll > 0 ? fmtPct(r.erf) : '–'}</td>
+              <td>${st ? `<span class="badge ${st}">${st}</span>` : '<span class="empty" style="padding:0;">keine SOLL-Daten</span>'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="card panel">
+      <div class="toolbar" style="margin-bottom:10px;justify-content:space-between;">
+        <h2 style="margin:0;">Monatstrend</h2>
+        <select id="trendMetricSel">
+          <option value="umsatz" ${trendMetric === 'umsatz' ? 'selected' : ''}>Umsatz</option>
+          <option value="rohertrag" ${trendMetric === 'rohertrag' ? 'selected' : ''}>Rohertrag</option>
+          <option value="stunden" ${trendMetric === 'stunden' ? 'selected' : ''}>Stunden</option>
+        </select>
+      </div>
+      <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+    </div>
+  `;
+}
+
+function setupChart() {
+  const sel = document.getElementById('dashMonthSel');
+  if (sel) sel.addEventListener('change', () => { dashMonth = sel.value; render(); });
+  const metricSel = document.getElementById('trendMetricSel');
+  if (metricSel) metricSel.addEventListener('change', () => { trendMetric = metricSel.value; render(); });
+
+  const months = allMonthsUsed();
+  const sollAll = entriesOf('soll'), istAll = entriesOf('ist');
+  const sollByMonth = months.map(m => sumEntries(sollAll.filter(e => e.month === m)));
+  const istByMonth = months.map(m => sumEntries(istAll.filter(e => e.month === m)));
+  const labels = months.map(monthLabel);
+  const key = trendMetric;
+
+  const ctx = document.getElementById('trendChart');
+  if (!ctx) return;
+  if (trendChart) { trendChart.destroy(); trendChart = null; }
+  trendChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [
+      { label: 'SOLL', data: sollByMonth.map(v => v[key]), backgroundColor: '#93b4fb' },
+      { label: 'IST', data: istByMonth.map(v => v[key]), backgroundColor: '#0d9488' },
+    ]},
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top' } }, scales: { y: { beginAtZero: true } } }
+  });
+}
+
+// ---------- PROJEKTE ----------
+
+function projekteHTML() {
+  if (!data.projects.length) {
+    return `<div class="toolbar"><button class="btn primary" id="addProjectBtn">+ Neues Projekt</button></div><div class="empty">Noch keine Projekte angelegt.</div>`;
+  }
+  return `
+    <div class="toolbar"><button class="btn primary" id="addProjectBtn">+ Neues Projekt</button></div>
+    <div class="card panel">
+      <table>
+        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          ${data.projects.map(p => `
+            <tr>
+              <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
+              <td>${p.wochenstunden}</td><td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
+              <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
+              <td><span class="badge ${p.status}">${p.status}</span></td>
+              <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function openProjectModal(id) {
+  const p = id ? project(id) : null;
+  modalConfig = {
+    type: 'project', id: id || null,
+    values: p ? { ...p } : { kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Aktiv' },
+  };
+  render();
+}
+
+function renderModal() {
+  const c = modalConfig; if (!c) return;
+  const v = c.values;
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>${c.id ? 'Projekt bearbeiten' : 'Neues Projekt'}</h3>
+      <div class="field-row">
+        <div class="field"><label>Kunde</label><input type="text" id="f_kunde" value="${v.kunde || ''}"></div>
+        <div class="field"><label>Contractor</label><input type="text" id="f_contractor" value="${v.contractor || ''}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Startdatum</label><input type="date" id="f_start" value="${v.start_date || ''}"></div>
+        <div class="field"><label>Enddatum</label><input type="date" id="f_ende" value="${v.end_date || ''}"></div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Std./Woche</label><input type="number" id="f_wochenstunden" value="${v.wochenstunden}"></div>
+        <div class="field"><label>Status</label>
+          <select id="f_status">${['Aktiv','Pausiert','Beendet'].map(s => `<option value="${s}" ${v.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
+        <div class="field"><label>Charge / h (Umsatz)</label><input type="number" id="f_chargeH" value="${v.charge_h}"></div>
+      </div>
+      <div class="modal-actions">
+        ${c.id ? '<button class="btn danger" id="modalDelete">Löschen</button>' : ''}
+        <button class="btn" id="modalCancel">Abbrechen</button>
+        <button class="btn primary" id="modalSave">Speichern</button>
+      </div>
+    </div>`;
+  document.getElementById('app').appendChild(overlay);
+  document.getElementById('modalCancel').addEventListener('click', () => { modalConfig = null; render(); });
+  if (c.id) document.getElementById('modalDelete').addEventListener('click', () => deleteProject(c.id));
+  document.getElementById('modalSave').addEventListener('click', async () => {
+    const payload = {
+      kunde: document.getElementById('f_kunde').value.trim(),
+      contractor: document.getElementById('f_contractor').value.trim(),
+      start_date: document.getElementById('f_start').value || null,
+      end_date: document.getElementById('f_ende').value || null,
+      wochenstunden: Number(document.getElementById('f_wochenstunden').value) || 0,
+      pay_h: Number(document.getElementById('f_payH').value) || 0,
+      charge_h: Number(document.getElementById('f_chargeH').value) || 0,
+      status: document.getElementById('f_status').value,
+    };
+    if (c.id) await sb.from('projects').update(payload).eq('id', c.id);
+    else await sb.from('projects').insert(payload);
+    modalConfig = null;
+    await loadAll();
+  });
+}
+
+async function deleteProject(id) {
+  if (!confirm('Projekt inkl. aller SOLL/IST-Einträge löschen?')) return;
+  await sb.from('projects').delete().eq('id', id);
+  modalConfig = null;
+  await loadAll();
+}
+
+// ---------- SOLL / IST MONATSERFASSUNG ----------
+
+function monthEntryHTML(kind) {
+  const monthVal = kind === 'soll' ? sollMonth : istMonth;
+  const entries = entriesOf(kind);
+  const totals = sumEntries(entries.filter(e => e.month === monthVal));
+  return `
+    <div class="toolbar">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
+      <input type="month" id="monthPicker_${kind}" value="${monthVal}">
+    </div>
+    <div class="card panel">
+      <table>
+        <thead><tr><th>Kunde</th><th>Contractor</th><th>Stunden</th><th>Umsatz</th><th>Kosten</th><th>Rohertrag</th></tr></thead>
+        <tbody>
+          ${data.projects.map(p => {
+            const active = isActiveInMonth(p, monthVal);
+            const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
+            const stunden = entry ? entry.stunden : '';
+            const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
+            return `
+              <tr class="${active ? '' : 'inactive'}">
+                <td>${p.kunde}</td><td>${p.contractor}</td>
+                <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${active ? '' : 'disabled placeholder="–"'}></td>
+                <td>${fmtEUR(c.umsatz)}</td><td>${fmtEUR(c.kosten)}</td><td>${fmtEUR(c.rohertrag)}</td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight:700;">
+            <td colspan="2">Summe ${monthLabel(monthVal)}</td>
+            <td>${fmtNum(totals.stunden, 0)}</td><td>${fmtEUR(totals.umsatz)}</td><td>${fmtEUR(totals.kosten)}</td><td>${fmtEUR(totals.rohertrag)}</td>
+          </tr>
+        </tfoot>
+      </table>
+      ${!data.projects.length ? '<div class="empty">Erst Projekte im Tab "Projekte" anlegen.</div>' : ''}
+    </div>
+  `;
+}
+
+async function setEntry(kind, projectId, monthVal, stunden) {
+  const existing = data.entries.find(e => e.project_id === projectId && e.kind === kind && e.month === monthVal);
+  if (stunden === '' || stunden === null || isNaN(stunden)) {
+    if (existing) await sb.from('entries').delete().eq('id', existing.id);
+  } else if (existing) {
+    await sb.from('entries').update({ stunden }).eq('id', existing.id);
+  } else {
+    await sb.from('entries').insert({ project_id: projectId, kind, month: monthVal, stunden });
+  }
+  await loadAll();
+}
+
+// ---------- EVENTS ----------
+
+function wireTabEvents() {
+  const addBtn = document.getElementById('addProjectBtn');
+  if (addBtn) addBtn.addEventListener('click', () => openProjectModal(null));
+  document.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openProjectModal(b.dataset.edit)));
+  document.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => deleteProject(b.dataset.del)));
+  ['soll', 'ist'].forEach(kind => {
+    const picker = document.getElementById('monthPicker_' + kind);
+    if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
+  });
+  document.querySelectorAll('input[data-kind]').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const kind = inp.dataset.kind;
+      const pid = inp.dataset.pid;
+      const monthVal = kind === 'soll' ? sollMonth : istMonth;
+      const val = inp.value === '' ? '' : Number(inp.value);
+      setEntry(kind, pid, monthVal, val);
+    });
+  });
+}
+
+// ---------- BOOTSTRAP ----------
+
+sb.auth.onAuthStateChange((event, newSession) => {
+  session = newSession;
+  if (session) {
+    renderAuth(); // clears any stale auth screen instantly, then app takes over
+    document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>';
+    subscribeRealtime();
+    loadAll();
+  } else {
+    if (realtimeChannel) { sb.removeChannel(realtimeChannel); realtimeChannel = null; }
+    renderAuth();
+  }
+});
+
+sb.auth.getSession().then(({ data: { session: s } }) => {
+  session = s;
+  if (session) { document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>'; subscribeRealtime(); loadAll(); }
+  else renderAuth();
+});
+</script>
+</body>
+</html>
