@@ -281,14 +281,15 @@ function consultantShareForProject(p, consultantId) {
   return 1;
 }
 
-// Summe des einem Consultant zugerechneten Umsatzes über eine Liste von Entries (z.B. alle IST-Einträge eines Monats).
+// Summe des einem Consultant zugerechneten Rohertrags (Umsatz - Kosten = Stunden x Marge/h) über
+// eine Liste von Entries (z.B. alle IST-Einträge eines Monats). Provision wird auf Rohertrag berechnet, nicht auf Umsatz.
 function attributedRevenue(consultantId, entries) {
   let total = 0;
   for (const e of entries) {
     const p = project(e.project_id);
     if (!p) continue;
     const share = consultantShareForProject(p, consultantId);
-    if (share > 0) total += computeEntry(e).umsatz * share;
+    if (share > 0) total += computeEntry(e).rohertrag * share;
   }
   return total;
 }
@@ -340,7 +341,7 @@ function provisionenHTML() {
 
     <div class="card panel">
       <div class="toolbar" style="justify-content:space-between;">
-        <h2 style="margin:0;">Monatliche Provision (individuell, IST-Umsatz)</h2>
+        <h2 style="margin:0;">Monatliche Provision (individuell, IST-Rohertrag)</h2>
         <div class="toolbar" style="margin:0;">
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
           <input type="month" id="provMonthPicker" value="${provMonth}">
@@ -349,7 +350,7 @@ function provisionenHTML() {
       ${!individuals.length ? '<div class="empty">Keine individuellen Consultants (ohne Team-Lead-Status) angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Consultant</th><th>Zugerechneter Umsatz</th><th>Satz</th><th>Provision ${monthLabel(provMonth)}</th></tr></thead>
+        <thead><tr><th>Consultant</th><th>Zugerechneter Rohertrag</th><th>Satz</th><th>Provision ${monthLabel(provMonth)}</th></tr></thead>
         <tbody>
           ${individuals.map(c => {
             const rev = attributedRevenue(c.id, monthEntries);
@@ -368,11 +369,11 @@ function provisionenHTML() {
 
     <div class="card panel">
       <h2>Team-Provision (Quartal) – ${quarterLabel(qYear, qNum)}</h2>
-      <div class="empty" style="padding-top:0;text-align:left;">Team-Leads erhalten statt der monatlichen 15% einen eigenen Satz auf den IST-Umsatz ihres gesamten Teams, summiert über das Quartal (${qMonths.map(monthLabel).join(', ')}).</div>
+      <div class="empty" style="padding-top:0;text-align:left;">Team-Leads erhalten statt der monatlichen 15% einen eigenen Satz auf den IST-Rohertrag ihres gesamten Teams, summiert über das Quartal (${qMonths.map(monthLabel).join(', ')}).</div>
       ${!teamLeads.length ? '<div class="empty">Kein Team-Lead angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Team-Lead</th><th>Team-Mitglieder</th><th>Team-Umsatz (Quartal)</th><th>Satz</th><th>Provision ${quarterLabel(qYear, qNum)}</th></tr></thead>
+        <thead><tr><th>Team-Lead</th><th>Team-Mitglieder</th><th>Team-Rohertrag (Quartal)</th><th>Satz</th><th>Provision ${quarterLabel(qYear, qNum)}</th></tr></thead>
         <tbody>
           ${teamLeads.map(lead => {
             const members = data.consultants.filter(c => c.team_lead_id === lead.id);
