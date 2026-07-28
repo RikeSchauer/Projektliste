@@ -51,6 +51,9 @@
   .badge.Aktiv { background: var(--green-bg); color: var(--green); }
   .badge.Pausiert { background: var(--amber-bg); color: var(--amber); }
   .badge.Beendet { background: #eee; color: #666; }
+  .mini-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 6px; vertical-align: middle; }
+  .mini-badge.auto { background: var(--green-bg); color: var(--green); }
+  .mini-badge.manuell { background: var(--amber-bg); color: var(--amber); }
   .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
   select, input[type=text], input[type=number], input[type=date], input[type=month], input[type=email], input[type=password] {
     font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text);
@@ -95,8 +98,7 @@
 
 <script>
 /* ============================================================
-   1) HIER EINTRAGEN — Supabase-Zugangsdaten
-   Zu finden in Supabase: Project Settings -> API
+   Supabase-Zugangsdaten
    ============================================================ */
 const SUPABASE_URL = 'https://uevefmvbpznvuvhvkdwl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVldmVmbXZicHpudnV2aHZrZHdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyMjUzMTYsImV4cCI6MjEwMDgwMTMxNn0.ewGSI6UcXpInCL1z9VTqcqsGxBPd5Aqt4YUMulrml5E';
@@ -145,6 +147,72 @@ function isActiveInMonth(p, monthStr) {
   if (start && start > monthEnd) return false;
   if (ende && ende < monthStart) return false;
   return true;
+}
+
+// ---------- AUTOMATISCHE SOLL-BERECHNUNG (aus Projektlaufzeit) ----------
+
+function round1(n) { return Math.round((n || 0) * 10) / 10; }
+function parseDateUTC(s) { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); }
+function daysInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
+function monthRangeUTC(monthStr) { const [y, m] = monthStr.split('-').map(Number); return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 0)]; }
+
+// Gesamte "bestellte" Stunden über die komplette Projektlaufzeit (Wochenstunden x Wochen)
+function projectTotalSollHours(p) {
+  const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
+  if (ps === null || pe === null || pe < ps) return 0;
+  return round1((p.wochenstunden || 0) * daysInclusive(ps, pe) / 7);
+}
+
+// Anteil der Gesamtstunden, der auf einen bestimmten Monat entfällt (nach Tagesüberlappung)
+function projectMonthSollHours(p, monthStr) {
+  const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
+  if (ps === null || pe === null) return 0;
+  const [ms, me] = monthRangeUTC(monthStr);
+  const os = Math.max(ps, ms), oe = Math.min(pe, me);
+  if (os > oe) return 0;
+  return round1((p.wochenstunden || 0) * daysInclusive(os, oe) / 7);
+}
+
+function monthListForProject(p) {
+  if (!p.start_date || !p.end_date) return [];
+  const [sy, sm] = p.start_date.split('-').map(Number);
+  const [ey, em] = p.end_date.split('-').map(Number);
+  const out = []; let y = sy, m = sm, guard = 0;
+  while ((y < ey || (y === ey && m <= em)) && guard < 240) {
+    out.push(y + '-' + String(m).padStart(2, '0'));
+    m++; if (m > 12) { m = 1; y++; }
+    guard++;
+  }
+  return out;
+}
+
+// Gleicht die SOLL-Einträge eines Projekts mit der berechneten Monatsverteilung ab.
+// Manuell überschriebene Monate (auto === false) werden dabei nicht angetastet.
+async function syncAutoSoll(proj) {
+  const months = monthListForProject(proj);
+  const monthSet = new Set(months);
+  const existing = data.entries.filter(e => e.project_id === proj.id && e.kind === 'soll');
+
+  for (const m of months) {
+    const hours = projectMonthSollHours(proj, m);
+    const ex = existing.find(e => e.month === m);
+    if (!ex) {
+      await sb.from('entries').insert({ project_id: proj.id, kind: 'soll', month: m, stunden: hours, auto: true });
+    } else if (ex.auto && Math.abs((ex.stunden || 0) - hours) > 0.05) {
+      await sb.from('entries').update({ stunden: hours }).eq('id', ex.id);
+    }
+  }
+  const stale = existing.filter(e => e.auto && !monthSet.has(e.month));
+  for (const e of stale) {
+    await sb.from('entries').delete().eq('id', e.id);
+  }
+  await loadAll();
+}
+
+async function recalcAllSoll() {
+  for (const p of data.projects) {
+    await syncAutoSoll(p);
+  }
 }
 
 function computeEntry(e) {
@@ -410,19 +478,22 @@ function setupChart() {
 // ---------- PROJEKTE ----------
 
 function projekteHTML() {
-  if (!data.projects.length) {
-    return `<div class="toolbar"><button class="btn primary" id="addProjectBtn">+ Neues Projekt</button></div><div class="empty">Noch keine Projekte angelegt.</div>`;
-  }
   return `
-    <div class="toolbar"><button class="btn primary" id="addProjectBtn">+ Neues Projekt</button></div>
+    <div class="toolbar">
+      <button class="btn primary" id="addProjectBtn">+ Neues Projekt</button>
+      <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
+    </div>
+    ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
       <table>
-        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Status</th><th></th></tr></thead>
         <tbody>
           ${data.projects.map(p => `
             <tr>
               <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
-              <td>${p.wochenstunden}</td><td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
+              <td>${p.wochenstunden}</td>
+              <td>${fmtNum(projectTotalSollHours(p), 1)} Std.</td>
+              <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
               <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
               <td><span class="badge ${p.status}">${p.status}</span></td>
               <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
@@ -430,6 +501,8 @@ function projekteHTML() {
         </tbody>
       </table>
     </div>
+    <div class="empty" style="padding-top:0;">"Sollstunden gesamt" wird automatisch aus Start-/Enddatum und Std./Woche berechnet und im SOLL-Tab auf die Monate verteilt.</div>
+    `}
   `;
 }
 
@@ -488,10 +561,17 @@ function renderModal() {
       charge_h: Number(document.getElementById('f_chargeH').value) || 0,
       status: document.getElementById('f_status').value,
     };
-    if (c.id) await sb.from('projects').update(payload).eq('id', c.id);
-    else await sb.from('projects').insert(payload);
+    let proj = null;
+    if (c.id) {
+      const { data: updated } = await sb.from('projects').update(payload).eq('id', c.id).select().single();
+      proj = updated;
+    } else {
+      const { data: inserted } = await sb.from('projects').insert(payload).select().single();
+      proj = inserted;
+    }
     modalConfig = null;
     await loadAll();
+    if (proj) await syncAutoSoll(proj);
   });
 }
 
@@ -512,6 +592,7 @@ function monthEntryHTML(kind) {
     <div class="toolbar">
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
       <input type="month" id="monthPicker_${kind}" value="${monthVal}">
+      ${kind === 'soll' ? '<span style="font-size:12px;color:var(--muted);">Werte werden automatisch aus der Projektlaufzeit berechnet – <span class="mini-badge auto">auto</span> = berechnet, <span class="mini-badge manuell">manuell</span> = von dir angepasst.</span>' : ''}
     </div>
     <div class="card panel">
       <table>
@@ -522,10 +603,11 @@ function monthEntryHTML(kind) {
             const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
             const stunden = entry ? entry.stunden : '';
             const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
+            const badge = kind === 'soll' && entry ? `<span class="mini-badge ${entry.auto ? 'auto' : 'manuell'}">${entry.auto ? 'auto' : 'manuell'}</span>` : '';
             return `
               <tr class="${active ? '' : 'inactive'}">
                 <td>${p.kunde}</td><td>${p.contractor}</td>
-                <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${active ? '' : 'disabled placeholder="–"'}></td>
+                <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${active ? '' : 'disabled placeholder="–"'}>${badge}</td>
                 <td>${fmtEUR(c.umsatz)}</td><td>${fmtEUR(c.kosten)}</td><td>${fmtEUR(c.rohertrag)}</td>
               </tr>`;
           }).join('')}
@@ -546,10 +628,18 @@ async function setEntry(kind, projectId, monthVal, stunden) {
   const existing = data.entries.find(e => e.project_id === projectId && e.kind === kind && e.month === monthVal);
   if (stunden === '' || stunden === null || isNaN(stunden)) {
     if (existing) await sb.from('entries').delete().eq('id', existing.id);
+    if (kind === 'soll') {
+      const proj = project(projectId);
+      if (proj) { await syncAutoSoll(proj); return; }
+    }
   } else if (existing) {
-    await sb.from('entries').update({ stunden }).eq('id', existing.id);
+    const patch = { stunden };
+    if (kind === 'soll') patch.auto = false; // manuelle Änderung überschreibt die Automatik
+    await sb.from('entries').update(patch).eq('id', existing.id);
   } else {
-    await sb.from('entries').insert({ project_id: projectId, kind, month: monthVal, stunden });
+    const payload = { project_id: projectId, kind, month: monthVal, stunden };
+    if (kind === 'soll') payload.auto = false;
+    await sb.from('entries').insert(payload);
   }
   await loadAll();
 }
@@ -559,6 +649,8 @@ async function setEntry(kind, projectId, monthVal, stunden) {
 function wireTabEvents() {
   const addBtn = document.getElementById('addProjectBtn');
   if (addBtn) addBtn.addEventListener('click', () => openProjectModal(null));
+  const recalcBtn = document.getElementById('recalcSollBtn');
+  if (recalcBtn) recalcBtn.addEventListener('click', async () => { recalcBtn.disabled = true; recalcBtn.textContent = 'Berechne…'; await recalcAllSoll(); });
   document.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openProjectModal(b.dataset.edit)));
   document.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => deleteProject(b.dataset.del)));
   ['soll', 'ist'].forEach(kind => {
