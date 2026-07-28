@@ -139,6 +139,9 @@ let trendChart = null;
 let modalConfig = null;
 let realtimeChannel = null;
 let reportConfig = null; // { consultantId } – wenn gesetzt, wird im Provisionen-Tab die Abrechnung statt der Übersicht gezeigt
+let projFilterKunde = 'all';
+let projFilterStatus = 'all';
+let projSort = 'kunde'; // 'kunde' | 'start_asc' | 'start_desc' | 'end_asc' | 'end_desc'
 
 function currentMonthStr() {
   const d = new Date();
@@ -879,11 +882,52 @@ function setupChart() {
 
 // ---------- PROJEKTE ----------
 
+// Sortiert und filtert die Projektliste für die Projekte-Ansicht. Kunden werden dabei
+// immer alphabetisch einsortiert (bzw. per Sortier-Dropdown auch nach Start/Ende).
+function filteredSortedProjects() {
+  let list = data.projects.slice();
+  if (projFilterKunde !== 'all') list = list.filter(p => p.kunde === projFilterKunde);
+  if (projFilterStatus !== 'all') list = list.filter(p => p.status === projFilterStatus);
+
+  const dateVal = (s, fallback) => s ? parseDateUTC(s) : fallback;
+  if (projSort === 'start_asc') list.sort((a, b) => dateVal(a.start_date, Infinity) - dateVal(b.start_date, Infinity));
+  else if (projSort === 'start_desc') list.sort((a, b) => dateVal(b.start_date, -Infinity) - dateVal(a.start_date, -Infinity));
+  else if (projSort === 'end_asc') list.sort((a, b) => dateVal(a.end_date, Infinity) - dateVal(b.end_date, Infinity));
+  else if (projSort === 'end_desc') list.sort((a, b) => dateVal(b.end_date, -Infinity) - dateVal(a.end_date, -Infinity));
+  else list.sort((a, b) => a.kunde.localeCompare(b.kunde) || a.contractor.localeCompare(b.contractor));
+
+  return list;
+}
+
 function projekteHTML() {
+  const kundenOptions = Array.from(new Set(data.projects.map(p => p.kunde))).sort((a, b) => a.localeCompare(b));
+  const list = filteredSortedProjects();
+
   return `
     <div class="toolbar">
       <button class="btn primary" id="addProjectBtn">+ Neues Projekt</button>
       <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
+    </div>
+    <div class="toolbar">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
+      <select id="projFilterKundeSel">
+        <option value="all">Alle</option>
+        ${kundenOptions.map(k => `<option value="${k}" ${projFilterKunde === k ? 'selected' : ''}>${k}</option>`).join('')}
+      </select>
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
+      <select id="projFilterStatusSel">
+        <option value="all" ${projFilterStatus === 'all' ? 'selected' : ''}>Alle</option>
+        ${['Aktiv', 'Pausiert', 'Beendet'].map(s => `<option value="${s}" ${projFilterStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+      </select>
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Sortieren:</label>
+      <select id="projSortSel">
+        <option value="kunde" ${projSort === 'kunde' ? 'selected' : ''}>Kunde (A–Z)</option>
+        <option value="start_asc" ${projSort === 'start_asc' ? 'selected' : ''}>Start (früh → spät)</option>
+        <option value="start_desc" ${projSort === 'start_desc' ? 'selected' : ''}>Start (spät → früh)</option>
+        <option value="end_asc" ${projSort === 'end_asc' ? 'selected' : ''}>Ende (früh → spät)</option>
+        <option value="end_desc" ${projSort === 'end_desc' ? 'selected' : ''}>Ende (spät → früh)</option>
+      </select>
+      ${(projFilterKunde !== 'all' || projFilterStatus !== 'all') ? '<button class="btn" id="projFilterResetBtn">Filter zurücksetzen</button>' : ''}
     </div>
     ${!data.projects.length ? '<div class="empty">Noch keine Projekte angelegt.</div>' : `
     <div class="card panel">
@@ -891,7 +935,7 @@ function projekteHTML() {
       <table class="projekte-table">
         <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
         <tbody>
-          ${data.projects.map(p => `
+          ${list.map(p => `
             <tr>
               <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
               <td>${p.wochenstunden}</td>
@@ -902,6 +946,7 @@ function projekteHTML() {
               <td><span class="badge ${p.status}">${p.status}</span></td>
               <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
             </tr>`).join('')}
+          ${!list.length ? '<tr><td colspan="13" class="empty">Keine Projekte für diesen Filter.</td></tr>' : ''}
         </tbody>
       </table>
       </div>
@@ -1071,6 +1116,14 @@ function wireTabEvents() {
   if (recalcBtn) recalcBtn.addEventListener('click', async () => { recalcBtn.disabled = true; recalcBtn.textContent = 'Berechne…'; await recalcAllSoll(); });
   document.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openProjectModal(b.dataset.edit)));
   document.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => deleteProject(b.dataset.del)));
+  const projFilterKundeSel = document.getElementById('projFilterKundeSel');
+  if (projFilterKundeSel) projFilterKundeSel.addEventListener('change', () => { projFilterKunde = projFilterKundeSel.value; render(); });
+  const projFilterStatusSel = document.getElementById('projFilterStatusSel');
+  if (projFilterStatusSel) projFilterStatusSel.addEventListener('change', () => { projFilterStatus = projFilterStatusSel.value; render(); });
+  const projSortSel = document.getElementById('projSortSel');
+  if (projSortSel) projSortSel.addEventListener('change', () => { projSort = projSortSel.value; render(); });
+  const projFilterResetBtn = document.getElementById('projFilterResetBtn');
+  if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; render(); });
   ['soll', 'ist'].forEach(kind => {
     const picker = document.getElementById('monthPicker_' + kind);
     if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
