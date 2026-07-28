@@ -115,11 +115,12 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], entries: [] };
+let data = { projects: [], entries: [], consultants: [] };
 let activeTab = 'dashboard';
 let dashMonth = 'all';
 let sollMonth = currentMonthStr();
 let istMonth = currentMonthStr();
+let provMonth = currentMonthStr();
 let trendMetric = 'umsatz';
 let trendChart = null;
 let modalConfig = null;
@@ -264,20 +265,217 @@ function statusFromErf(erf, hasSoll) {
 }
 function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return MONTH_NAMES[mo - 1] + ' ' + y; }
 
+// ---------- PROVISIONEN ----------
+
+function consultant(id) { return data.consultants.find(c => c.id === id); }
+function consultantName(id) { const c = consultant(id); return c ? c.name : '–'; }
+
+// Umsatz, der einem Consultant aus einem Projekt zugerechnet wird: voll, wenn er alleine
+// oder mit sich selbst in beiden Rollen zugewiesen ist; halb, wenn zwei unterschiedliche
+// Consultants am Projekt hängen.
+function consultantShareForProject(p, consultantId) {
+  const c1 = p.consultant1_id, c2 = p.consultant2_id;
+  const involved = c1 === consultantId || c2 === consultantId;
+  if (!involved) return 0;
+  if (c1 && c2 && c1 !== c2) return 0.5;
+  return 1;
+}
+
+// Summe des einem Consultant zugerechneten Umsatzes über eine Liste von Entries (z.B. alle IST-Einträge eines Monats).
+function attributedRevenue(consultantId, entries) {
+  let total = 0;
+  for (const e of entries) {
+    const p = project(e.project_id);
+    if (!p) continue;
+    const share = consultantShareForProject(p, consultantId);
+    if (share > 0) total += computeEntry(e).umsatz * share;
+  }
+  return total;
+}
+
+function quarterOfMonth(monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  const q = Math.floor((m - 1) / 3) + 1;
+  return { year: y, quarter: q };
+}
+function monthsInQuarter(year, quarter) {
+  const startM = (quarter - 1) * 3 + 1;
+  return [0, 1, 2].map(i => year + '-' + String(startM + i).padStart(2, '0'));
+}
+function quarterLabel(year, quarter) { return 'Q' + quarter + ' ' + year; }
+
+function provisionenHTML() {
+  const istAll = entriesOf('ist');
+  const monthEntries = istAll.filter(e => e.month === provMonth);
+  const teamLeads = data.consultants.filter(c => c.is_team_lead);
+  const individuals = data.consultants.filter(c => !c.is_team_lead);
+  const { year: qYear, quarter: qNum } = quarterOfMonth(provMonth);
+  const qMonths = monthsInQuarter(qYear, qNum);
+  const qEntries = istAll.filter(e => qMonths.includes(e.month));
+
+  return `
+    <div class="card panel">
+      <div class="toolbar" style="justify-content:space-between;">
+        <h2 style="margin:0;">Consultants</h2>
+        <button class="btn primary" id="addConsultantBtn">+ Neuer Consultant</button>
+      </div>
+      ${!data.consultants.length ? '<div class="empty">Noch keine Consultants angelegt.</div>' : `
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Name</th><th>Provisionssatz</th><th>Team-Lead</th><th>Team-Satz (Quartal)</th><th>Teil von Team</th><th></th></tr></thead>
+        <tbody>
+          ${data.consultants.map(c => `
+            <tr>
+              <td>${c.name}</td>
+              <td>${fmtPct(c.rate)}</td>
+              <td>${c.is_team_lead ? '<span class="badge Aktiv">Ja</span>' : '–'}</td>
+              <td>${c.is_team_lead ? fmtPct(c.team_rate) : '–'}</td>
+              <td>${c.team_lead_id ? consultantName(c.team_lead_id) : '–'}</td>
+              <td><button class="link" data-edit-consultant="${c.id}">Bearbeiten</button> <button class="link danger" data-del-consultant="${c.id}">Löschen</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>`}
+    </div>
+
+    <div class="card panel">
+      <div class="toolbar" style="justify-content:space-between;">
+        <h2 style="margin:0;">Monatliche Provision (individuell, IST-Umsatz)</h2>
+        <div class="toolbar" style="margin:0;">
+          <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
+          <input type="month" id="provMonthPicker" value="${provMonth}">
+        </div>
+      </div>
+      ${!individuals.length ? '<div class="empty">Keine individuellen Consultants (ohne Team-Lead-Status) angelegt.</div>' : `
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Consultant</th><th>Zugerechneter Umsatz</th><th>Satz</th><th>Provision ${monthLabel(provMonth)}</th></tr></thead>
+        <tbody>
+          ${individuals.map(c => {
+            const rev = attributedRevenue(c.id, monthEntries);
+            const commission = rev * (c.rate || 0);
+            return `<tr>
+              <td><strong>${c.name}</strong></td>
+              <td>${fmtEUR(rev)}</td>
+              <td>${fmtPct(c.rate)}</td>
+              <td>${fmtEUR(commission)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      </div>`}
+    </div>
+
+    <div class="card panel">
+      <h2>Team-Provision (Quartal) – ${quarterLabel(qYear, qNum)}</h2>
+      <div class="empty" style="padding-top:0;text-align:left;">Team-Leads erhalten statt der monatlichen 15% einen eigenen Satz auf den IST-Umsatz ihres gesamten Teams, summiert über das Quartal (${qMonths.map(monthLabel).join(', ')}).</div>
+      ${!teamLeads.length ? '<div class="empty">Kein Team-Lead angelegt.</div>' : `
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Team-Lead</th><th>Team-Mitglieder</th><th>Team-Umsatz (Quartal)</th><th>Satz</th><th>Provision ${quarterLabel(qYear, qNum)}</th></tr></thead>
+        <tbody>
+          ${teamLeads.map(lead => {
+            const members = data.consultants.filter(c => c.team_lead_id === lead.id);
+            const teamRev = members.reduce((sum, m) => sum + attributedRevenue(m.id, qEntries), 0);
+            const commission = teamRev * (lead.team_rate || 0);
+            return `<tr>
+              <td><strong>${lead.name}</strong></td>
+              <td>${members.length ? members.map(m => m.name).join(', ') : '<span class="empty" style="padding:0;">keine Mitglieder zugewiesen</span>'}</td>
+              <td>${fmtEUR(teamRev)}</td>
+              <td>${fmtPct(lead.team_rate)}</td>
+              <td>${fmtEUR(commission)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+      </div>`}
+    </div>
+  `;
+}
+
+function openConsultantModal(id) {
+  const c = id ? consultant(id) : null;
+  modalConfig = {
+    type: 'consultant', id: id || null,
+    values: c ? { ...c } : { name: '', rate: 0.15, is_team_lead: false, team_rate: 0.05, team_lead_id: '' },
+  };
+  render();
+}
+
+function renderConsultantModal(c) {
+  const v = c.values;
+  const otherConsultants = data.consultants.filter(x => x.id !== c.id);
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>${c.id ? 'Consultant bearbeiten' : 'Neuer Consultant'}</h3>
+      <div class="field"><label>Name</label><input type="text" id="cf_name" value="${v.name || ''}"></div>
+      <div class="field-row">
+        <div class="field"><label>Provisionssatz (monatlich, individuell)</label><input type="number" step="0.01" id="cf_rate" value="${v.rate}"></div>
+        <div class="field"><label>Teil von Team (optional)</label>
+          <select id="cf_team_lead_id">
+            <option value="">– kein Team –</option>
+            ${otherConsultants.filter(x => x.is_team_lead).map(x => `<option value="${x.id}" ${v.team_lead_id === x.id ? 'selected' : ''}>${x.name}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Ist Team-Lead?</label>
+          <select id="cf_is_team_lead">
+            <option value="false" ${!v.is_team_lead ? 'selected' : ''}>Nein</option>
+            <option value="true" ${v.is_team_lead ? 'selected' : ''}>Ja</option>
+          </select>
+        </div>
+        <div class="field"><label>Team-Satz (quartalsweise, nur falls Team-Lead)</label><input type="number" step="0.01" id="cf_team_rate" value="${v.team_rate}"></div>
+      </div>
+      <div class="modal-actions">
+        ${c.id ? '<button class="btn danger" id="modalDeleteConsultant">Löschen</button>' : ''}
+        <button class="btn" id="modalCancelConsultant">Abbrechen</button>
+        <button class="btn primary" id="modalSaveConsultant">Speichern</button>
+      </div>
+    </div>`;
+  document.getElementById('app').appendChild(overlay);
+  document.getElementById('modalCancelConsultant').addEventListener('click', () => { modalConfig = null; render(); });
+  if (c.id) document.getElementById('modalDeleteConsultant').addEventListener('click', () => deleteConsultant(c.id));
+  document.getElementById('modalSaveConsultant').addEventListener('click', async () => {
+    const payload = {
+      name: document.getElementById('cf_name').value.trim(),
+      rate: Number(document.getElementById('cf_rate').value) || 0,
+      is_team_lead: document.getElementById('cf_is_team_lead').value === 'true',
+      team_rate: Number(document.getElementById('cf_team_rate').value) || 0,
+      team_lead_id: document.getElementById('cf_team_lead_id').value || null,
+    };
+    if (c.id) await sb.from('consultants').update(payload).eq('id', c.id);
+    else await sb.from('consultants').insert(payload);
+    modalConfig = null;
+    await loadAll();
+  });
+}
+
+async function deleteConsultant(id) {
+  if (!confirm('Consultant löschen? Zuweisungen an Projekten werden dabei entfernt (nicht die Projekte selbst).')) return;
+  await sb.from('consultants').delete().eq('id', id);
+  modalConfig = null;
+  await loadAll();
+}
+
 // ---------- DATA LOADING ----------
 
 async function loadAll() {
-  const [{ data: projects, error: e1 }, { data: entries, error: e2 }] = await Promise.all([
+  const [{ data: projects, error: e1 }, { data: entries, error: e2 }, { data: consultants, error: e3 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
+    sb.from('consultants').select('*').order('created_at'),
   ]);
-  if (e1 || e2) {
-    console.error('load error', e1, e2);
-    renderError((e1 || e2).message);
+  if (e1 || e2 || e3) {
+    console.error('load error', e1, e2, e3);
+    renderError((e1 || e2 || e3).message);
     return;
   }
   data.projects = projects || [];
   data.entries = entries || [];
+  data.consultants = consultants || [];
   render();
 }
 
@@ -286,6 +484,7 @@ function subscribeRealtime() {
   realtimeChannel = sb.channel('public:all-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'projects' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'consultants' }, () => loadAll())
     .subscribe();
 }
 
@@ -375,6 +574,7 @@ function render() {
       <button data-tab="projekte" class="${activeTab === 'projekte' ? 'active' : ''}">Projekte</button>
       <button data-tab="soll" class="${activeTab === 'soll' ? 'active' : ''}">SOLL</button>
       <button data-tab="ist" class="${activeTab === 'ist' ? 'active' : ''}">IST</button>
+      <button data-tab="provisionen" class="${activeTab === 'provisionen' ? 'active' : ''}">Provisionen</button>
     </nav>
     <div id="tab-content"></div>
     <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
@@ -387,10 +587,12 @@ function render() {
   else if (activeTab === 'projekte') content.innerHTML = projekteHTML();
   else if (activeTab === 'soll') content.innerHTML = monthEntryHTML('soll');
   else if (activeTab === 'ist') content.innerHTML = monthEntryHTML('ist');
+  else if (activeTab === 'provisionen') content.innerHTML = provisionenHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
-  if (modalConfig) renderModal();
+  if (modalConfig && modalConfig.type === 'project') renderModal();
+  if (modalConfig && modalConfig.type === 'consultant') renderConsultantModal(modalConfig);
 }
 
 // ---------- DASHBOARD ----------
@@ -531,7 +733,7 @@ function projekteHTML() {
     <div class="card panel">
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h</th><th>Charge/h</th><th>Marge/h</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th></th></tr></thead>
         <tbody>
           ${data.projects.map(p => `
             <tr>
@@ -540,6 +742,7 @@ function projekteHTML() {
               <td>${fmtNum(projectTotalSollHours(p), 1)} Std.</td>
               <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
               <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
+              <td>${[p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' + ') || '–'}</td>
               <td><span class="badge ${p.status}">${p.status}</span></td>
               <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
             </tr>`).join('')}
@@ -556,9 +759,14 @@ function openProjectModal(id) {
   const p = id ? project(id) : null;
   modalConfig = {
     type: 'project', id: id || null,
-    values: p ? { ...p } : { kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Aktiv' },
+    values: p ? { ...p } : { kunde: '', contractor: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Aktiv', consultant1_id: '', consultant2_id: '' },
   };
   render();
+}
+
+function consultantOptionsHTML(selectedId) {
+  return '<option value="">– keiner –</option>' +
+    data.consultants.map(c => `<option value="${c.id}" ${selectedId === c.id ? 'selected' : ''}>${c.name}</option>`).join('');
 }
 
 function renderModal() {
@@ -587,6 +795,10 @@ function renderModal() {
         <div class="field"><label>Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
         <div class="field"><label>Charge / h (Umsatz)</label><input type="number" id="f_chargeH" value="${v.charge_h}"></div>
       </div>
+      <div class="field-row">
+        <div class="field"><label>Consultant 1</label><select id="f_consultant1">${consultantOptionsHTML(v.consultant1_id)}</select></div>
+        <div class="field"><label>Consultant 2 (optional)</label><select id="f_consultant2">${consultantOptionsHTML(v.consultant2_id)}</select></div>
+      </div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDelete">Löschen</button>' : ''}
         <button class="btn" id="modalCancel">Abbrechen</button>
@@ -606,6 +818,8 @@ function renderModal() {
       pay_h: Number(document.getElementById('f_payH').value) || 0,
       charge_h: Number(document.getElementById('f_chargeH').value) || 0,
       status: document.getElementById('f_status').value,
+      consultant1_id: document.getElementById('f_consultant1').value || null,
+      consultant2_id: document.getElementById('f_consultant2').value || null,
     };
     let proj = null;
     if (c.id) {
@@ -705,6 +919,12 @@ function wireTabEvents() {
     const picker = document.getElementById('monthPicker_' + kind);
     if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
   });
+  const addConsultantBtn = document.getElementById('addConsultantBtn');
+  if (addConsultantBtn) addConsultantBtn.addEventListener('click', () => openConsultantModal(null));
+  document.querySelectorAll('[data-edit-consultant]').forEach(b => b.addEventListener('click', () => openConsultantModal(b.dataset.editConsultant)));
+  document.querySelectorAll('[data-del-consultant]').forEach(b => b.addEventListener('click', () => deleteConsultant(b.dataset.delConsultant)));
+  const provPicker = document.getElementById('provMonthPicker');
+  if (provPicker) provPicker.addEventListener('change', () => { provMonth = provPicker.value; render(); });
   document.querySelectorAll('input[data-kind]').forEach(inp => {
     inp.addEventListener('change', () => {
       const kind = inp.dataset.kind;
