@@ -144,6 +144,10 @@ let istMonth = currentMonthStr();
 let provMonth = currentMonthStr();
 let trendMetric = 'umsatz';
 let trendChart = null;
+let dashKundeFilter = 'all'; // 'all' oder ein Kundenname – steuert die Detail-Tabelle bei "Umsatz pro Kunde"
+let kundeChart = null;
+// Feste Farbfolge für das Kunden-Tortendiagramm (wird bei mehr Kunden als Farben zyklisch wiederverwendet).
+const PIE_COLORS = ['#2563eb', '#0d9488', '#7c3aed', '#b45309', '#15803d', '#b91c1c', '#db2777', '#0891b2', '#65a30d', '#9333ea', '#ea580c', '#0284c7'];
 let modalConfig = null;
 let realtimeChannel = null;
 let reportConfig = null; // { consultantId } – wenn gesetzt, wird im Provisionen-Tab die Abrechnung statt der Übersicht gezeigt
@@ -874,28 +878,44 @@ function dashboardHTML() {
       </table>
     </div>
     <div class="card panel">
-      <h2>Umsatz pro Kunde ${dashMonth === 'all' ? '(alle Monate)' : '(' + monthLabel(dashMonth) + ')'}</h2>
-      <div class="table-scroll">
-      <table>
-        <thead><tr><th>Kunde</th><th>Umsatz SOLL</th><th>Umsatz IST</th><th>Kosten SOLL</th><th>Kosten IST</th><th>Rohertrag SOLL</th><th>Rohertrag IST</th><th>Erfüllung Rohertrag</th></tr></thead>
-        <tbody>
-          ${perKunde.map(k => {
-            const erf = k.sollRohertrag > 0 ? k.istRohertrag / k.sollRohertrag : 0;
-            return `<tr>
-              <td><strong>${k.kunde}</strong></td>
-              <td>${fmtEUR(k.sollUmsatz)}</td>
-              <td>${fmtEUR(k.istUmsatz)}</td>
-              <td>${fmtEUR(k.sollKosten)}</td>
-              <td>${fmtEUR(k.istKosten)}</td>
-              <td>${fmtEUR(k.sollRohertrag)}</td>
-              <td style="color:${k.istRohertrag < k.sollRohertrag ? 'var(--red)' : 'var(--green)'}">${fmtEUR(k.istRohertrag)}</td>
-              <td>${k.sollRohertrag > 0 ? fmtPct(erf) : '–'}</td>
-            </tr>`;
-          }).join('')}
-          ${!perKunde.length ? '<tr><td colspan="8" class="empty">Noch keine Projekte/Kunden vorhanden.</td></tr>' : ''}
-        </tbody>
-      </table>
+      <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
+        <h2 style="margin:0;">Umsatz pro Kunde ${dashMonth === 'all' ? '(alle Monate)' : '(' + monthLabel(dashMonth) + ')'}</h2>
+        <div class="toolbar" style="margin:0;">
+          <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
+          <select id="dashKundeSel">
+            <option value="all" ${dashKundeFilter === 'all' ? 'selected' : ''}>Alle (nur Diagramm)</option>
+            ${perKunde.map(k => `<option value="${k.kunde}" ${dashKundeFilter === k.kunde ? 'selected' : ''}>${k.kunde}</option>`).join('')}
+          </select>
+        </div>
       </div>
+      ${!perKunde.length ? '<div class="empty">Noch keine Projekte/Kunden vorhanden.</div>' : `
+      <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start;">
+        <div style="flex:1 1 380px;min-width:300px;">
+          ${(() => {
+            const selected = dashKundeFilter === 'all' ? null : perKunde.find(k => k.kunde === dashKundeFilter);
+            if (!selected) {
+              return '<div class="empty" style="text-align:left;">Oben einen Kunden auswählen, um dessen Zahlen einzeln zu sehen – rechts siehst du alle Kunden zusammen im Diagramm.</div>';
+            }
+            const erf = selected.sollRohertrag > 0 ? selected.istRohertrag / selected.sollRohertrag : 0;
+            return `
+              <table>
+                <thead><tr><th>Bereich</th><th>SOLL</th><th>IST</th></tr></thead>
+                <tbody>
+                  <tr><td><strong>Umsatz</strong></td><td>${fmtEUR(selected.sollUmsatz)}</td><td>${fmtEUR(selected.istUmsatz)}</td></tr>
+                  <tr><td><strong>Kosten</strong></td><td>${fmtEUR(selected.sollKosten)}</td><td>${fmtEUR(selected.istKosten)}</td></tr>
+                  <tr><td><strong>Rohertrag</strong></td><td>${fmtEUR(selected.sollRohertrag)}</td><td style="color:${selected.istRohertrag < selected.sollRohertrag ? 'var(--red)' : 'var(--green)'}">${fmtEUR(selected.istRohertrag)}</td></tr>
+                </tbody>
+                <tfoot><tr style="font-weight:700;"><td>Erfüllung Rohertrag</td><td colspan="2">${selected.sollRohertrag > 0 ? fmtPct(erf) : '–'}</td></tr></tfoot>
+              </table>
+            `;
+          })()}
+        </div>
+        <div style="flex:1 1 280px;min-width:260px;">
+          <div class="chart-wrap" style="height:240px;"><canvas id="kundeChart"></canvas></div>
+          <div class="empty" style="padding-top:6px;">Umsatz (IST) je Kunde – alle Kunden zusammengefasst.</div>
+        </div>
+      </div>
+      `}
     </div>
     <div class="card panel">
       <div class="toolbar" style="margin-bottom:10px;justify-content:space-between;">
@@ -916,6 +936,28 @@ function setupChart() {
   if (sel) sel.addEventListener('change', () => { dashMonth = sel.value; render(); });
   const metricSel = document.getElementById('trendMetricSel');
   if (metricSel) metricSel.addEventListener('change', () => { trendMetric = metricSel.value; render(); });
+  const kundeSel = document.getElementById('dashKundeSel');
+  if (kundeSel) kundeSel.addEventListener('change', () => { dashKundeFilter = kundeSel.value; render(); });
+
+  // Kunden-Tortendiagramm: IST-Umsatz-Verteilung über alle Kunden (unabhängig von der Auswahl oben,
+  // aber innerhalb des gewählten Zeitraums oben rechts).
+  const kundeCtx = document.getElementById('kundeChart');
+  if (kundeCtx) {
+    const sollForChart = dashMonth === 'all' ? entriesOf('soll') : entriesOf('soll').filter(e => e.month === dashMonth);
+    const istForChart = dashMonth === 'all' ? entriesOf('ist') : entriesOf('ist').filter(e => e.month === dashMonth);
+    const perKundeForChart = customerBreakdown(sollForChart, istForChart).filter(k => k.istUmsatz > 0);
+    if (kundeChart) { kundeChart.destroy(); kundeChart = null; }
+    if (perKundeForChart.length) {
+      kundeChart = new Chart(kundeCtx, {
+        type: 'pie',
+        data: {
+          labels: perKundeForChart.map(k => k.kunde),
+          datasets: [{ data: perKundeForChart.map(k => k.istUmsatz), backgroundColor: perKundeForChart.map((k, i) => PIE_COLORS[i % PIE_COLORS.length]) }],
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } },
+      });
+    }
+  }
 
   const months = allMonthsUsed();
   const sollAll = entriesOf('soll'), istAll = entriesOf('ist');
@@ -1205,7 +1247,7 @@ function monthEntryHTML(kind) {
     <div class="card panel">
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Kunde</th><th>Contractor</th><th>Stunden</th><th>Umsatz</th><th>Kosten</th><th>Rohertrag</th></tr></thead>
+        <thead><tr><th>Kunde</th><th>Contractor</th><th>Pay/h · Pauschale</th><th>Charge/h · Pauschale</th><th>Stunden</th><th>Umsatz</th><th>Kosten</th><th>Rohertrag</th></tr></thead>
         <tbody>
           ${data.projects.map(p => {
             const active = isActiveInMonth(p, monthVal);
@@ -1216,6 +1258,7 @@ function monthEntryHTML(kind) {
             return `
               <tr class="${active ? '' : 'inactive'}">
                 <td>${p.kunde}</td><td>${p.contractor}</td>
+                <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
                 <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${active ? '' : 'disabled placeholder="–"'}>${badge}</td>
                 <td>${fmtEUR(c.umsatz)}</td><td>${fmtEUR(c.kosten)}</td><td>${fmtEUR(c.rohertrag)}</td>
               </tr>`;
@@ -1223,7 +1266,7 @@ function monthEntryHTML(kind) {
         </tbody>
         <tfoot>
           <tr style="font-weight:700;">
-            <td colspan="2">Summe ${monthLabel(monthVal)}</td>
+            <td colspan="4">Summe ${monthLabel(monthVal)}</td>
             <td>${fmtNum(totals.stunden, 0)}</td><td>${fmtEUR(totals.umsatz)}</td><td>${fmtEUR(totals.kosten)}</td><td>${fmtEUR(totals.rohertrag)}</td>
           </tr>
         </tfoot>
