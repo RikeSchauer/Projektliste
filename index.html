@@ -1234,15 +1234,19 @@ function monthEntryHTML(kind) {
         <tbody>
           ${data.projects.map(p => {
             const active = isActiveInMonth(p, monthVal);
+            // IST-Stunden sollen auch nachträglich für bereits beendete Contractor eintragbar sein
+            // (echte geleistete Stunden können außerhalb des geplanten Projektfensters liegen).
+            // Nur bei SOLL bleibt die Sperre, da SOLL automatisch aus der Projektlaufzeit berechnet wird.
+            const editable = active || kind === 'ist';
             const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
             const stunden = entry ? entry.stunden : '';
             const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
             const badge = kind === 'soll' && entry ? `<span class="mini-badge ${entry.auto ? 'auto' : 'manuell'}">${entry.auto ? 'auto' : 'manuell'}</span>` : '';
             return `
-              <tr class="${active ? '' : 'inactive'}">
+              <tr class="${editable ? '' : 'inactive'}">
                 <td>${p.kunde}</td><td>${p.contractor}</td>
                 <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
-                <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${active ? '' : 'disabled placeholder="–"'}>${badge}</td>
+                <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${editable ? '' : 'disabled placeholder="–"'}>${badge}</td>
                 <td>${fmtEUR(c.umsatz)}</td><td>${fmtEUR(c.kosten)}</td><td>${fmtEUR(c.rohertrag)}</td>
               </tr>`;
           }).join('')}
