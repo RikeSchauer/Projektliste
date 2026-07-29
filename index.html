@@ -143,6 +143,7 @@ let sollMonth = currentMonthStr();
 let istMonth = currentMonthStr();
 let provMonth = currentMonthStr();
 let trendChart = null;
+let trendShow = { umsatz: true, kosten: true, rohertrag: true }; // steuert, welche Linien im Monatstrend gezeigt werden
 let kundeChart = null;
 // Feste Farbfolge für das Kunden-Tortendiagramm (wird bei mehr Kunden als Farben zyklisch wiederverwendet).
 const PIE_COLORS = ['#2563eb', '#0d9488', '#7c3aed', '#b45309', '#15803d', '#b91c1c', '#db2777', '#0891b2', '#65a30d', '#9333ea', '#ea580c', '#0284c7'];
@@ -882,8 +883,16 @@ function dashboardHTML() {
       `}
     </div>
     <div class="card panel">
-      <h2 style="margin:0 0 12px;">Monatstrend (IST): Umsatz, Kosten &amp; Rohertrag</h2>
-      <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+      <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
+        <h2 style="margin:0;">Monatstrend (IST)</h2>
+        <div class="toolbar" style="margin:0;gap:14px;flex-wrap:wrap;">
+          <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_umsatz" ${trendShow.umsatz ? 'checked' : ''}> Umsatz</label>
+          <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_kosten" ${trendShow.kosten ? 'checked' : ''}> Kosten</label>
+          <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_rohertrag" ${trendShow.rohertrag ? 'checked' : ''}> Rohertrag</label>
+          <button class="btn" id="trendShowAllBtn">Alle anzeigen</button>
+        </div>
+      </div>
+      ${(trendShow.umsatz || trendShow.kosten || trendShow.rohertrag) ? '<div class="chart-wrap"><canvas id="trendChart"></canvas></div>' : '<div class="empty">Bitte oben mindestens eine Kennzahl auswählen.</div>'}
     </div>
   `;
 }
@@ -911,27 +920,46 @@ function setupChart() {
     }
   }
 
-  // Monatstrend als Liniendiagramm: Umsatz, Kosten und Rohertrag (jeweils IST) in eigenen Farben,
-  // damit die Entwicklung über die Monate auf einen Blick vergleichbar ist.
+  // Checkboxen zur Auswahl, welche Kennzahlen im Monatstrend gezeigt werden (einzeln oder alle).
+  ['umsatz', 'kosten', 'rohertrag'].forEach(key => {
+    const cb = document.getElementById('trendShow_' + key);
+    if (cb) cb.addEventListener('change', () => { trendShow[key] = cb.checked; render(); });
+  });
+  const trendShowAllBtn = document.getElementById('trendShowAllBtn');
+  if (trendShowAllBtn) trendShowAllBtn.addEventListener('click', () => { trendShow = { umsatz: true, kosten: true, rohertrag: true }; render(); });
+
+  // Monatstrend als Liniendiagramm: Umsatz, Kosten und Rohertrag (jeweils IST) in eigenen Farben.
+  // tension: 0 = gerade Linien zwischen den echten Monatswerten, damit zwischen Monaten ohne
+  // Daten keine unsinnigen "Hügel" durch Kurvenglättung entstehen.
   const months = allMonthsUsed();
   const istByMonth = months.map(m => sumEntries(entriesOf('ist').filter(e => e.month === m)));
   const labels = months.map(monthLabel);
+  const trendDatasetDefs = [
+    { key: 'umsatz', label: 'Umsatz', color: '#2563eb' },
+    { key: 'kosten', label: 'Kosten', color: '#b91c1c' },
+    { key: 'rohertrag', label: 'Rohertrag', color: '#15803d' },
+  ];
 
   const ctx = document.getElementById('trendChart');
-  if (!ctx) return;
   if (trendChart) { trendChart.destroy(); trendChart = null; }
-  trendChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        { label: 'Umsatz', data: istByMonth.map(v => v.umsatz), borderColor: '#2563eb', backgroundColor: '#2563eb', fill: false, tension: 0.3 },
-        { label: 'Kosten', data: istByMonth.map(v => v.kosten), borderColor: '#b91c1c', backgroundColor: '#b91c1c', fill: false, tension: 0.3 },
-        { label: 'Rohertrag', data: istByMonth.map(v => v.rohertrag), borderColor: '#15803d', backgroundColor: '#15803d', fill: false, tension: 0.3 },
-      ],
-    },
-    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top' } }, scales: { y: { beginAtZero: true } } },
-  });
+  if (ctx) {
+    const activeDefs = trendDatasetDefs.filter(d => trendShow[d.key]);
+    trendChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: activeDefs.map(d => ({
+          label: d.label,
+          data: istByMonth.map(v => v[d.key]),
+          borderColor: d.color,
+          backgroundColor: d.color,
+          fill: false,
+          tension: 0,
+        })),
+      },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top' } }, scales: { y: { beginAtZero: true } } },
+    });
+  }
 }
 
 // ---------- PROJEKTE ----------
