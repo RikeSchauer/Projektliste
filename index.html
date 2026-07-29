@@ -157,6 +157,11 @@ let projFilterStartMonat = ''; // 'YYYY-MM' oder '' = kein Filter
 let projFilterEndeMonat = ''; // 'YYYY-MM' oder '' = kein Filter
 let projSearch = ''; // Freitext-Suche über alle Spalten der Projekte-Tabelle (wie in Excel)
 let projSort = 'kunde'; // 'kunde' | 'start_asc' | 'start_desc' | 'end_asc' | 'end_desc'
+// Excel-artige Suche & Filter für SOLL- und IST-Tabellen, jeweils getrennt pro Kind ('soll'/'ist').
+let entrySearch = { soll: '', ist: '' };
+let entryFilterKunde = { soll: 'all', ist: 'all' };
+let entryFilterArt = { soll: 'all', ist: 'all' };
+let entryFilterStatus = { soll: 'all', ist: 'all' };
 
 function currentMonthStr() {
   const d = new Date();
@@ -884,7 +889,7 @@ function dashboardHTML() {
     </div>
     <div class="card panel">
       <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
-        <h2 style="margin:0;">Monatstrend (IST vs. SOLL)</h2>
+        <h2 style="margin:0;">Monatstrend (IST)</h2>
         <div class="toolbar" style="margin:0;gap:14px;flex-wrap:wrap;">
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_umsatz" ${trendShow.umsatz ? 'checked' : ''}> Umsatz</label>
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_kosten" ${trendShow.kosten ? 'checked' : ''}> Kosten</label>
@@ -1231,39 +1236,110 @@ async function deleteProject(id) {
 
 // ---------- SOLL / IST MONATSERFASSUNG ----------
 
+// Baut für einen gegebenen Monat/Kind (soll/ist) pro Projekt eine Zeile mit allen angezeigten
+// Werten (inkl. berechnetem Umsatz/Kosten/Rohertrag) – Basis sowohl für die Tabelle als auch
+// für die Excel-artige Volltextsuche und die Filter.
+function entryRows(kind, monthVal) {
+  const entries = entriesOf(kind);
+  return data.projects.map(p => {
+    const active = isActiveInMonth(p, monthVal);
+    // IST-Stunden sollen auch nachträglich für bereits beendete Contractor eintragbar sein
+    // (echte geleistete Stunden können außerhalb des geplanten Projektfensters liegen).
+    // Nur bei SOLL bleibt die Sperre, da SOLL automatisch aus der Projektlaufzeit berechnet wird.
+    const editable = active || kind === 'ist';
+    const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
+    const stunden = entry ? entry.stunden : '';
+    const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
+    const badge = kind === 'soll' && entry ? `<span class="mini-badge ${entry.auto ? 'auto' : 'manuell'}">${entry.auto ? 'auto' : 'manuell'}</span>` : '';
+    return { p, editable, entry, stunden, c, badge, status: computedStatus(p), isPerm: p.projekttyp === 'perm' };
+  });
+}
+
+// Durchsuchbarer Text pro Zeile – analog zur Projekte-Suche, inkl. der für diesen Monat
+// berechneten Stunden/Umsatz/Kosten/Rohertrag, damit man z.B. auch nach Beträgen suchen kann.
+function entryRowSearchText(row) {
+  return [
+    row.isPerm ? 'Perm' : 'Contract',
+    row.p.kunde, row.p.contractor,
+    fmtEUR(row.p.pay_h), fmtEUR(row.p.charge_h),
+    row.stunden !== '' ? fmtNum(row.stunden, 1) : '',
+    fmtEUR(row.c.umsatz), fmtEUR(row.c.kosten), fmtEUR(row.c.rohertrag),
+    row.status,
+  ].join(' ').toLowerCase();
+}
+
+function filteredEntryRows(kind, monthVal) {
+  let rows = entryRows(kind, monthVal);
+  const filterKunde = entryFilterKunde[kind];
+  const filterArt = entryFilterArt[kind];
+  const filterStatus = entryFilterStatus[kind];
+  const search = entrySearch[kind];
+  if (filterKunde !== 'all') rows = rows.filter(r => r.p.kunde === filterKunde);
+  if (filterArt !== 'all') rows = rows.filter(r => (r.isPerm ? 'perm' : 'contract') === filterArt);
+  if (filterStatus !== 'all') rows = rows.filter(r => r.status === filterStatus);
+  if (search.trim()) {
+    const q = search.trim().toLowerCase();
+    rows = rows.filter(r => entryRowSearchText(r).includes(q));
+  }
+  return rows;
+}
+
 function monthEntryHTML(kind) {
   const monthVal = kind === 'soll' ? sollMonth : istMonth;
-  const entries = entriesOf(kind);
-  const totals = sumEntries(entries.filter(e => e.month === monthVal));
+  const kundenOptions = Array.from(new Set(data.projects.map(p => p.kunde))).sort((a, b) => a.localeCompare(b));
+  const rows = filteredEntryRows(kind, monthVal);
+  // Summe bezieht sich bewusst auf die aktuell gefilterte/gesuchte Auswahl, damit man z.B. nach
+  // einem Kunden filtern und direkt dessen Summe für den Monat sehen kann.
+  const totals = rows.reduce((acc, r) => {
+    acc.stunden += r.c.stunden; acc.umsatz += r.c.umsatz; acc.kosten += r.c.kosten; acc.rohertrag += r.c.rohertrag;
+    return acc;
+  }, { stunden: 0, umsatz: 0, kosten: 0, rohertrag: 0 });
+  const search = entrySearch[kind];
+  const filterKunde = entryFilterKunde[kind];
+  const filterArt = entryFilterArt[kind];
+  const filterStatus = entryFilterStatus[kind];
   return `
     <div class="toolbar">
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
       <input type="month" id="monthPicker_${kind}" value="${monthVal}">
       ${kind === 'soll' ? '<span style="font-size:12px;color:var(--muted);">Werte werden automatisch aus der Projektlaufzeit berechnet – <span class="mini-badge auto">auto</span> = berechnet, <span class="mini-badge manuell">manuell</span> = von dir angepasst.</span>' : ''}
     </div>
+    <div class="toolbar" style="margin-bottom:10px;">
+      <input type="text" id="entrySearchInput_${kind}" placeholder="🔍 Suchen (Kunde, Contractor, Status, Zahlen …)" style="width:340px;" value="${search}">
+      ${search ? `<button class="btn" id="entrySearchClearBtn_${kind}">✕ Suche leeren</button>` : ''}
+    </div>
+    <div class="toolbar-filters">
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Art:</label>
+      <select id="entryFilterArtSel_${kind}">
+        <option value="all" ${filterArt === 'all' ? 'selected' : ''}>Alle</option>
+        <option value="contract" ${filterArt === 'contract' ? 'selected' : ''}>Contract</option>
+        <option value="perm" ${filterArt === 'perm' ? 'selected' : ''}>Perm</option>
+      </select>
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
+      <select id="entryFilterKundeSel_${kind}">
+        <option value="all">Alle</option>
+        ${kundenOptions.map(k => `<option value="${k}" ${filterKunde === k ? 'selected' : ''}>${k}</option>`).join('')}
+      </select>
+      <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
+      <select id="entryFilterStatusSel_${kind}">
+        <option value="all" ${filterStatus === 'all' ? 'selected' : ''}>Alle</option>
+        ${['Noch nicht aktiv', 'Aktiv', 'Pausiert', 'Beendet'].map(s => `<option value="${s}" ${filterStatus === s ? 'selected' : ''}>${s}</option>`).join('')}
+      </select>
+      ${(filterKunde !== 'all' || filterArt !== 'all' || filterStatus !== 'all' || search) ? `<button class="btn" id="entryFilterResetBtn_${kind}">Filter zurücksetzen</button>` : ''}
+    </div>
     <div class="card panel">
       <div class="table-scroll">
       <table>
         <thead><tr><th>Kunde</th><th>Contractor</th><th>Pay/h · Pauschale</th><th>Charge/h · Pauschale</th><th>Stunden</th><th>Umsatz</th><th>Kosten</th><th>Rohertrag</th></tr></thead>
         <tbody>
-          ${data.projects.map(p => {
-            const active = isActiveInMonth(p, monthVal);
-            // IST-Stunden sollen auch nachträglich für bereits beendete Contractor eintragbar sein
-            // (echte geleistete Stunden können außerhalb des geplanten Projektfensters liegen).
-            // Nur bei SOLL bleibt die Sperre, da SOLL automatisch aus der Projektlaufzeit berechnet wird.
-            const editable = active || kind === 'ist';
-            const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
-            const stunden = entry ? entry.stunden : '';
-            const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
-            const badge = kind === 'soll' && entry ? `<span class="mini-badge ${entry.auto ? 'auto' : 'manuell'}">${entry.auto ? 'auto' : 'manuell'}</span>` : '';
-            return `
+          ${rows.map(({ p, editable, stunden, c, badge }) => `
               <tr class="${editable ? '' : 'inactive'}">
                 <td>${p.kunde}</td><td>${p.contractor}</td>
                 <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
                 <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${editable ? '' : 'disabled placeholder="–"'}>${badge}</td>
                 <td>${fmtEUR(c.umsatz)}</td><td>${fmtEUR(c.kosten)}</td><td>${fmtEUR(c.rohertrag)}</td>
-              </tr>`;
-          }).join('')}
+              </tr>`).join('')}
+          ${!rows.length ? '<tr><td colspan="8" class="empty">Keine Projekte für diesen Filter.</td></tr>' : ''}
         </tbody>
         <tfoot>
           <tr style="font-weight:700;">
@@ -1342,6 +1418,34 @@ function wireTabEvents() {
   ['soll', 'ist'].forEach(kind => {
     const picker = document.getElementById('monthPicker_' + kind);
     if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
+
+    const entryFilterArtSel = document.getElementById('entryFilterArtSel_' + kind);
+    if (entryFilterArtSel) entryFilterArtSel.addEventListener('change', () => { entryFilterArt[kind] = entryFilterArtSel.value; render(); });
+    const entryFilterKundeSel = document.getElementById('entryFilterKundeSel_' + kind);
+    if (entryFilterKundeSel) entryFilterKundeSel.addEventListener('change', () => { entryFilterKunde[kind] = entryFilterKundeSel.value; render(); });
+    const entryFilterStatusSel = document.getElementById('entryFilterStatusSel_' + kind);
+    if (entryFilterStatusSel) entryFilterStatusSel.addEventListener('change', () => { entryFilterStatus[kind] = entryFilterStatusSel.value; render(); });
+    const entryFilterResetBtn = document.getElementById('entryFilterResetBtn_' + kind);
+    if (entryFilterResetBtn) entryFilterResetBtn.addEventListener('click', () => {
+      entryFilterKunde[kind] = 'all'; entryFilterArt[kind] = 'all'; entryFilterStatus[kind] = 'all'; entrySearch[kind] = ''; render();
+    });
+    const entrySearchInput = document.getElementById('entrySearchInput_' + kind);
+    if (entrySearchInput) {
+      // Live-Filterung bei jedem Tastendruck (wie in Excel), inkl. Fokus-/Cursor-Wiederherstellung
+      // nach dem Neu-Rendern (siehe projSearchInput weiter oben für die gleiche Logik).
+      entrySearchInput.addEventListener('input', () => {
+        entrySearch[kind] = entrySearchInput.value;
+        render();
+        const freshInput = document.getElementById('entrySearchInput_' + kind);
+        if (freshInput) {
+          freshInput.focus();
+          const pos = freshInput.value.length;
+          freshInput.setSelectionRange(pos, pos);
+        }
+      });
+    }
+    const entrySearchClearBtn = document.getElementById('entrySearchClearBtn_' + kind);
+    if (entrySearchClearBtn) entrySearchClearBtn.addEventListener('click', () => { entrySearch[kind] = ''; render(); });
   });
   const addConsultantBtn = document.getElementById('addConsultantBtn');
   if (addConsultantBtn) addConsultantBtn.addEventListener('click', () => openConsultantModal(null));
