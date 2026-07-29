@@ -27,7 +27,7 @@
   nav.tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
   nav.tabs button:hover { color: var(--text); }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(20,20,43,.03); }
-  .grid-kpi { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
+  .grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
   @media (max-width: 900px) { .grid-kpi { grid-template-columns: repeat(2, 1fr); } }
   .kpi { border-radius: 12px; padding: 14px 16px; border: 1px solid var(--border); }
   .kpi .label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
@@ -818,8 +818,12 @@ function dashboardHTML() {
   const ist = sumEntries(istEntries);
 
   const aktiveFreelancer = data.projects.filter(p => computedStatus(p) === 'Aktiv').length;
-  const margen = data.projects.map(margeH).filter(v => v > 0);
-  const avgMargeH = margen.length ? margen.reduce((a, b) => a + b, 0) / margen.length : 0;
+  // Marge/h für Contract- und Perm-Projekte getrennt, da bei Perm die "Marge" die gesamte
+  // Pauschale abbildet und mit echten Stundensätzen nicht vergleichbar/mischbar ist.
+  const margenContract = data.projects.filter(p => p.projekttyp !== 'perm').map(margeH).filter(v => v > 0);
+  const avgMargeContract = margenContract.length ? margenContract.reduce((a, b) => a + b, 0) / margenContract.length : 0;
+  const margenPerm = data.projects.filter(p => p.projekttyp === 'perm').map(margeH).filter(v => v > 0);
+  const avgMargePerm = margenPerm.length ? margenPerm.reduce((a, b) => a + b, 0) / margenPerm.length : 0;
   const margeGesamtFaktor = ist.kosten > 0 ? ist.umsatz / ist.kosten : 0;
 
   const erfStunden = soll.stunden > 0 ? ist.stunden / soll.stunden : 0;
@@ -844,7 +848,8 @@ function dashboardHTML() {
     </div>
     <div class="grid-kpi">
       <div class="kpi purple"><div class="label">Aktive Freelancer</div><div class="value">${aktiveFreelancer}</div><div class="hint">von ${data.projects.length} Projekten gesamt</div></div>
-      <div class="kpi amber"><div class="label">Ø Marge / Std.</div><div class="value">${fmtEUR(avgMargeH)}</div><div class="hint">über alle aktiven Sätze</div></div>
+      <div class="kpi amber"><div class="label">Ø Marge/h (Contract)</div><div class="value">${fmtEUR(avgMargeContract)}</div><div class="hint">über alle Contract-Sätze &gt; 0</div></div>
+      <div class="kpi amber"><div class="label">Ø Marge (Perm)</div><div class="value">${fmtEUR(avgMargePerm)}</div><div class="hint">über alle Perm-Pauschalen &gt; 0</div></div>
       <div class="kpi blue"><div class="label">Umsatz / Kosten-Faktor (IST)</div><div class="value">${fmtNum(margeGesamtFaktor, 2)}×</div><div class="hint">IST-Umsatz ÷ IST-Kosten</div></div>
       <div class="kpi teal"><div class="label">Erfüllung Umsatz</div><div class="value">${fmtPct(erfUmsatz)}</div><div class="hint">IST ÷ SOLL</div></div>
     </div>
