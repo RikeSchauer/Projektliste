@@ -884,7 +884,7 @@ function dashboardHTML() {
     </div>
     <div class="card panel">
       <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
-        <h2 style="margin:0;">Monatstrend (IST)</h2>
+        <h2 style="margin:0;">Monatstrend (IST vs. SOLL)</h2>
         <div class="toolbar" style="margin:0;gap:14px;flex-wrap:wrap;">
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_umsatz" ${trendShow.umsatz ? 'checked' : ''}> Umsatz</label>
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_kosten" ${trendShow.kosten ? 'checked' : ''}> Kosten</label>
@@ -928,35 +928,49 @@ function setupChart() {
   const trendShowAllBtn = document.getElementById('trendShowAllBtn');
   if (trendShowAllBtn) trendShowAllBtn.addEventListener('click', () => { trendShow = { umsatz: true, kosten: true, rohertrag: true }; render(); });
 
-  // Monatstrend als Liniendiagramm: Umsatz, Kosten und Rohertrag (jeweils IST) in eigenen Farben.
+  // Monatstrend als Liniendiagramm: Umsatz, Kosten und Rohertrag (jeweils IST) in eigenen Farben,
+  // zusätzlich SOLL als gestrichelte Linie in einem Grauton je Kennzahl (heller/dunkler), damit man
+  // IST vs. SOLL für alle drei Kennzahlen auf einen Blick vergleichen kann.
   // tension: 0 = gerade Linien zwischen den echten Monatswerten, damit zwischen Monaten ohne
   // Daten keine unsinnigen "Hügel" durch Kurvenglättung entstehen.
   const months = allMonthsUsed();
   const istByMonth = months.map(m => sumEntries(entriesOf('ist').filter(e => e.month === m)));
+  const sollByMonth = months.map(m => sumEntries(entriesOf('soll').filter(e => e.month === m)));
   const labels = months.map(monthLabel);
   const trendDatasetDefs = [
-    { key: 'umsatz', label: 'Umsatz', color: '#2563eb' },
-    { key: 'kosten', label: 'Kosten', color: '#b91c1c' },
-    { key: 'rohertrag', label: 'Rohertrag', color: '#15803d' },
+    { key: 'umsatz', label: 'Umsatz', color: '#2563eb', sollColor: '#9ca3af' },
+    { key: 'kosten', label: 'Kosten', color: '#b91c1c', sollColor: '#6b7280' },
+    { key: 'rohertrag', label: 'Rohertrag', color: '#15803d', sollColor: '#374151' },
   ];
 
   const ctx = document.getElementById('trendChart');
   if (trendChart) { trendChart.destroy(); trendChart = null; }
   if (ctx) {
     const activeDefs = trendDatasetDefs.filter(d => trendShow[d.key]);
+    const datasets = [];
+    activeDefs.forEach(d => {
+      datasets.push({
+        label: d.label + ' (IST)',
+        data: istByMonth.map(v => v[d.key]),
+        borderColor: d.color,
+        backgroundColor: d.color,
+        fill: false,
+        tension: 0,
+      });
+      datasets.push({
+        label: d.label + ' (SOLL)',
+        data: sollByMonth.map(v => v[d.key]),
+        borderColor: d.sollColor,
+        backgroundColor: d.sollColor,
+        borderDash: [6, 4],
+        fill: false,
+        tension: 0,
+        pointRadius: 2,
+      });
+    });
     trendChart = new Chart(ctx, {
       type: 'line',
-      data: {
-        labels,
-        datasets: activeDefs.map(d => ({
-          label: d.label,
-          data: istByMonth.map(v => v[d.key]),
-          borderColor: d.color,
-          backgroundColor: d.color,
-          fill: false,
-          tension: 0,
-        })),
-      },
+      data: { labels, datasets },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top' } }, scales: { y: { beginAtZero: true } } },
     });
   }
