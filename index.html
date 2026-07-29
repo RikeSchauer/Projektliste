@@ -1241,18 +1241,27 @@ async function deleteProject(id) {
 // für die Excel-artige Volltextsuche und die Filter.
 function entryRows(kind, monthVal) {
   const entries = entriesOf(kind);
-  return data.projects.map(p => {
-    const active = isActiveInMonth(p, monthVal);
-    // IST-Stunden sollen auch nachträglich für bereits beendete Contractor eintragbar sein
-    // (echte geleistete Stunden können außerhalb des geplanten Projektfensters liegen).
-    // Nur bei SOLL bleibt die Sperre, da SOLL automatisch aus der Projektlaufzeit berechnet wird.
-    const editable = active || kind === 'ist';
-    const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
-    const stunden = entry ? entry.stunden : '';
-    const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
-    const badge = kind === 'soll' && entry ? `<span class="mini-badge ${entry.auto ? 'auto' : 'manuell'}">${entry.auto ? 'auto' : 'manuell'}</span>` : '';
-    return { p, editable, entry, stunden, c, badge, status: computedStatus(p), isPerm: p.projekttyp === 'perm' };
-  });
+  const [, monthEnd] = monthRangeUTC(monthVal);
+  return data.projects
+    .filter(p => {
+      // Projekte, die erst nach diesem Monat starten, werden für diesen Monat gar nicht erst
+      // angezeigt (macht keinen Sinn, z.B. im Januar einen Contractor zu sehen, der erst zum
+      // 01.02. startet). Bereits beendete Projekte bleiben dagegen sichtbar (siehe editable unten).
+      const ps = parseDateUTC(p.start_date);
+      return ps === null || ps <= monthEnd;
+    })
+    .map(p => {
+      const active = isActiveInMonth(p, monthVal);
+      // IST-Stunden sollen auch nachträglich für bereits beendete Contractor eintragbar sein
+      // (echte geleistete Stunden können außerhalb des geplanten Projektfensters liegen).
+      // Nur bei SOLL bleibt die Sperre, da SOLL automatisch aus der Projektlaufzeit berechnet wird.
+      const editable = active || kind === 'ist';
+      const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
+      const stunden = entry ? entry.stunden : '';
+      const c = computeEntry({ project_id: p.id, stunden: entry ? entry.stunden : 0 });
+      const badge = kind === 'soll' && entry ? `<span class="mini-badge ${entry.auto ? 'auto' : 'manuell'}">${entry.auto ? 'auto' : 'manuell'}</span>` : '';
+      return { p, editable, entry, stunden, c, badge, status: computedStatus(p), isPerm: p.projekttyp === 'perm' };
+    });
 }
 
 // Durchsuchbarer Text pro Zeile – analog zur Projekte-Suche, inkl. der für diesen Monat
