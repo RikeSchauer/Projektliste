@@ -136,7 +136,7 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], entries: [], consultants: [] };
+let data = { projects: [], entries: [], consultants: [], ki_vorschlaege: [] };
 let activeTab = 'dashboard';
 let dashMonth = 'all';
 let sollMonth = currentMonthStr();
@@ -162,6 +162,7 @@ let entrySearch = { soll: '', ist: '' };
 let entryFilterKunde = { soll: 'all', ist: 'all' };
 let entryFilterArt = { soll: 'all', ist: 'all' };
 let entryFilterStatus = { soll: 'all', ist: 'all' };
+let kiFilterStatus = 'pending'; // 'pending' | 'approved' | 'rejected' | 'all' – Filter im Tab "KI-Vorschläge"
 
 function currentMonthStr() {
   const d = new Date();
@@ -666,19 +667,24 @@ async function deleteConsultant(id) {
 // ---------- DATA LOADING ----------
 
 async function loadAll() {
-  const [{ data: projects, error: e1 }, { data: entries, error: e2 }, { data: consultants, error: e3 }] = await Promise.all([
+  const [{ data: projects, error: e1 }, { data: entries, error: e2 }, { data: consultants, error: e3 }, { data: kiVorschlaege, error: e4 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
+    // ki_vorschlaege ist optional – falls die Tabelle (noch) nicht existiert (Migration nicht ausgeführt),
+    // soll die App trotzdem normal weiterlaufen, nur der Tab "KI-Vorschläge" bleibt dann leer.
+    sb.from('ki_vorschlaege').select('*').order('created_at', { ascending: false }),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
     renderError((e1 || e2 || e3).message);
     return;
   }
+  if (e4) console.warn('ki_vorschlaege konnte nicht geladen werden (Migration ausgeführt?)', e4);
   data.projects = projects || [];
   data.entries = entries || [];
   data.consultants = consultants || [];
+  data.ki_vorschlaege = kiVorschlaege || [];
   render();
 }
 
@@ -688,6 +694,7 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'projects' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'consultants' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'ki_vorschlaege' }, () => loadAll())
     .subscribe();
 }
 
@@ -794,6 +801,7 @@ function render() {
       <button data-tab="soll" class="${activeTab === 'soll' ? 'active' : ''}">SOLL</button>
       <button data-tab="ist" class="${activeTab === 'ist' ? 'active' : ''}">IST</button>
       <button data-tab="provisionen" class="${activeTab === 'provisionen' ? 'active' : ''}">Provisionen</button>
+      <button data-tab="ki" class="${activeTab === 'ki' ? 'active' : ''}">KI-Vorschläge${data.ki_vorschlaege.filter(v => v.status === 'pending').length ? ` (${data.ki_vorschlaege.filter(v => v.status === 'pending').length})` : ''}</button>
     </nav>
     <div id="tab-content"></div>
     <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
@@ -807,6 +815,7 @@ function render() {
   else if (activeTab === 'soll') content.innerHTML = monthEntryHTML('soll');
   else if (activeTab === 'ist') content.innerHTML = monthEntryHTML('ist');
   else if (activeTab === 'provisionen') content.innerHTML = reportConfig ? consultantReportHTML() : provisionenHTML();
+  else if (activeTab === 'ki') content.innerHTML = kiVorschlaegeHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
@@ -889,7 +898,7 @@ function dashboardHTML() {
     </div>
     <div class="card panel">
       <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
-        <h2 style="margin:0;">Monatstrend (IST)</h2>
+        <h2 style="margin:0;">Monatstrend (IST vs. SOLL)</h2>
         <div class="toolbar" style="margin:0;gap:14px;flex-wrap:wrap;">
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_umsatz" ${trendShow.umsatz ? 'checked' : ''}> Umsatz</label>
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_kosten" ${trendShow.kosten ? 'checked' : ''}> Kosten</label>
@@ -1241,14 +1250,24 @@ async function deleteProject(id) {
 // für die Excel-artige Volltextsuche und die Filter.
 function entryRows(kind, monthVal) {
   const entries = entriesOf(kind);
-  const [, monthEnd] = monthRangeUTC(monthVal);
+  const [monthStart, monthEnd] = monthRangeUTC(monthVal);
   return data.projects
     .filter(p => {
       // Projekte, die erst nach diesem Monat starten, werden für diesen Monat gar nicht erst
       // angezeigt (macht keinen Sinn, z.B. im Januar einen Contractor zu sehen, der erst zum
-      // 01.02. startet). Bereits beendete Projekte bleiben dagegen sichtbar (siehe editable unten).
+      // 01.02. startet).
       const ps = parseDateUTC(p.start_date);
-      return ps === null || ps <= monthEnd;
+      if (ps !== null && ps > monthEnd) return false;
+      // Projekte, die vor diesem Monat schon beendet wurden: nur noch anzeigen, wenn es für
+      // genau diesen Monat bereits einen IST-Eintrag gibt (z.B. ein paar Reststunden kurz nach
+      // Vertragsende). So verschwinden alte, bereits erfasste Werte nicht, aber ein beendeter
+      // Contractor taucht nicht dauerhaft in jedem künftigen Monat als leere Zeile auf.
+      const pe = parseDateUTC(p.end_date);
+      if (pe !== null && pe < monthStart) {
+        if (kind !== 'ist') return false;
+        return entries.some(e => e.project_id === p.id && e.month === monthVal);
+      }
+      return true;
     })
     .map(p => {
       const active = isActiveInMonth(p, monthVal);
@@ -1383,6 +1402,99 @@ async function setEntry(kind, projectId, monthVal, stunden) {
   await loadAll();
 }
 
+// ---------- KI-VORSCHLÄGE (aus Weclapp-Rechnungen) ----------
+
+// Zeigt von der KI aus Weclapp-Eingangsrechnungen vorgeschlagene IST-Einträge (Contractor, Monat,
+// Stunden) zur Prüfung an. Erst nach "Übernehmen" wird daraus ein echter IST-Eintrag – die KI
+// schreibt nie direkt in die entries-Tabelle. Kommt aus einer separaten Supabase Edge Function
+// (siehe edge-functions/weclapp-sync und WECLAPP_KI_SETUP.md), die diese Tabelle befüllt.
+function kiVorschlaegeHTML() {
+  const counts = {
+    pending: data.ki_vorschlaege.filter(v => v.status === 'pending').length,
+    approved: data.ki_vorschlaege.filter(v => v.status === 'approved').length,
+    rejected: data.ki_vorschlaege.filter(v => v.status === 'rejected').length,
+  };
+  const list = data.ki_vorschlaege
+    .filter(v => kiFilterStatus === 'all' || v.status === kiFilterStatus)
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+  return `
+    <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
+      <div>
+        <h2 style="margin:0 0 2px;">KI-Vorschläge aus Weclapp</h2>
+        <div class="sub">Aus Eingangsrechnungen automatisch vorgeschlagene IST-Stunden – bitte vor der Übernahme prüfen und ggf. korrigieren.</div>
+      </div>
+      <div class="toolbar" style="margin:0;">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
+        <select id="kiFilterStatusSel">
+          <option value="pending" ${kiFilterStatus === 'pending' ? 'selected' : ''}>Offen (${counts.pending})</option>
+          <option value="approved" ${kiFilterStatus === 'approved' ? 'selected' : ''}>Übernommen (${counts.approved})</option>
+          <option value="rejected" ${kiFilterStatus === 'rejected' ? 'selected' : ''}>Abgelehnt (${counts.rejected})</option>
+          <option value="all" ${kiFilterStatus === 'all' ? 'selected' : ''}>Alle</option>
+        </select>
+      </div>
+    </div>
+    <div class="card panel">
+      ${!data.ki_vorschlaege.length ? '<div class="empty">Noch keine KI-Vorschläge vorhanden. Diese entstehen automatisch, sobald die Weclapp-Anbindung eingerichtet ist (siehe WECLAPP_KI_SETUP.md).</div>' : `
+      <div class="table-scroll">
+      <table>
+        <thead><tr><th>Rechnung</th><th>Contractor (Weclapp)</th><th>Projekt</th><th>Monat</th><th>Stunden</th><th>Methode</th><th>Betrag</th><th>Hinweis</th><th>Status</th><th>Aktionen</th></tr></thead>
+        <tbody>
+          ${list.map(v => {
+            const matched = v.project_id ? project(v.project_id) : null;
+            const isPending = v.status === 'pending';
+            return `
+            <tr>
+              <td>${v.rechnungsnummer || '–'}</td>
+              <td>${v.contractor_raw || '–'}</td>
+              <td>${isPending
+                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.projects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>${p.kunde} – ${p.contractor}</option>`).join('')}</select>`
+                : (matched ? `${matched.kunde} – ${matched.contractor}` : '<span class="empty" style="padding:0;">kein Projekt</span>')}</td>
+              <td>${isPending ? `<input type="month" data-vid="${v.id}" data-field="month" value="${v.month || ''}">` : (v.month ? monthLabel(v.month) : '–')}</td>
+              <td>${isPending ? `<input class="num-cell" type="number" step="0.5" min="0" data-vid="${v.id}" data-field="stunden" value="${v.stunden ?? ''}">` : fmtNum(v.stunden, 1)}</td>
+              <td>${v.methode ? `<span class="mini-badge ${v.methode === 'extrahiert' ? 'auto' : 'manuell'}">${v.methode}</span>` : '–'}</td>
+              <td>${v.betrag != null ? fmtEUR(v.betrag) : '–'}</td>
+              <td style="white-space:normal;max-width:220px;">${v.notiz ? `<span class="empty" style="padding:0;text-align:left;display:block;">${v.notiz}</span>` : ''}</td>
+              <td><span class="badge ${v.status === 'approved' ? 'Aktiv' : v.status === 'rejected' ? 'Kritisch' : 'Achtung'}">${v.status === 'approved' ? 'Übernommen' : v.status === 'rejected' ? 'Abgelehnt' : 'Offen'}</span></td>
+              <td>${isPending
+                ? `<button class="link" data-approve-ki="${v.id}">Übernehmen</button> <button class="link danger" data-reject-ki="${v.id}">Ablehnen</button>`
+                : `<button class="link" data-reset-ki="${v.id}">Zurücksetzen</button>`}</td>
+            </tr>`;
+          }).join('')}
+          ${!list.length ? '<tr><td colspan="10" class="empty">Keine Vorschläge in dieser Ansicht.</td></tr>' : ''}
+        </tbody>
+      </table>
+      </div>`}
+    </div>
+  `;
+}
+
+async function approveKiVorschlag(id) {
+  const projSel = document.querySelector(`[data-vid="${id}"][data-field="project"]`);
+  const monthInp = document.querySelector(`[data-vid="${id}"][data-field="month"]`);
+  const stundenInp = document.querySelector(`[data-vid="${id}"][data-field="stunden"]`);
+  const projectId = projSel ? projSel.value : '';
+  const monthVal = monthInp ? monthInp.value : '';
+  const stunden = stundenInp && stundenInp.value !== '' ? Number(stundenInp.value) : NaN;
+  if (!projectId || !monthVal || isNaN(stunden)) {
+    alert('Bitte Projekt, Monat und Stunden ausfüllen, bevor du übernimmst.');
+    return;
+  }
+  await setEntry('ist', projectId, monthVal, stunden);
+  await sb.from('ki_vorschlaege').update({ status: 'approved', project_id: projectId, month: monthVal, stunden, reviewed_at: new Date().toISOString() }).eq('id', id);
+  await loadAll();
+}
+
+async function rejectKiVorschlag(id) {
+  await sb.from('ki_vorschlaege').update({ status: 'rejected', reviewed_at: new Date().toISOString() }).eq('id', id);
+  await loadAll();
+}
+
+async function resetKiVorschlag(id) {
+  await sb.from('ki_vorschlaege').update({ status: 'pending', reviewed_at: null }).eq('id', id);
+  await loadAll();
+}
+
 // ---------- EVENTS ----------
 
 function wireTabEvents() {
@@ -1460,6 +1572,11 @@ function wireTabEvents() {
   if (addConsultantBtn) addConsultantBtn.addEventListener('click', () => openConsultantModal(null));
   document.querySelectorAll('[data-edit-consultant]').forEach(b => b.addEventListener('click', () => openConsultantModal(b.dataset.editConsultant)));
   document.querySelectorAll('[data-del-consultant]').forEach(b => b.addEventListener('click', () => deleteConsultant(b.dataset.delConsultant)));
+  const kiFilterStatusSel = document.getElementById('kiFilterStatusSel');
+  if (kiFilterStatusSel) kiFilterStatusSel.addEventListener('change', () => { kiFilterStatus = kiFilterStatusSel.value; render(); });
+  document.querySelectorAll('[data-approve-ki]').forEach(b => b.addEventListener('click', () => approveKiVorschlag(b.dataset.approveKi)));
+  document.querySelectorAll('[data-reject-ki]').forEach(b => b.addEventListener('click', () => rejectKiVorschlag(b.dataset.rejectKi)));
+  document.querySelectorAll('[data-reset-ki]').forEach(b => b.addEventListener('click', () => resetKiVorschlag(b.dataset.resetKi)));
   const provPicker = document.getElementById('provMonthPicker');
   if (provPicker) provPicker.addEventListener('change', () => { provMonth = provPicker.value; reportConfig = null; render(); });
   document.querySelectorAll('[data-report]').forEach(b => b.addEventListener('click', () => { reportConfig = { consultantId: b.dataset.report }; render(); }));
