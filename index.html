@@ -189,6 +189,9 @@ function isActiveInMonth(p, monthStr) {
   return true;
 }
 
+// Status wird automatisch aus der Projektlaufzeit erkannt: "Noch nicht aktiv" (Start liegt in der
+// Zukunft), "Beendet" (Ende liegt in der Vergangenheit) oder sonst "Aktiv". "Pausiert" ist die einzige
+// manuelle Ausnahme – wird sie im Projekt gesetzt, überschreibt sie die automatische Erkennung.
 function computedStatus(p) {
   if (p.status === 'Pausiert') return 'Pausiert';
   const today = new Date();
@@ -199,6 +202,7 @@ function computedStatus(p) {
   if (pe !== null && pe < todayUTC) return 'Beendet';
   return 'Aktiv';
 }
+// CSS-Klassennamen dürfen keine Leerzeichen enthalten, daher eigene Klasse für "Noch nicht aktiv".
 function statusBadgeClass(status) { return status === 'Noch nicht aktiv' ? 'Bevorstehend' : status; }
 
 // ---------- AUTOMATISCHE SOLL-BERECHNUNG (aus Projektlaufzeit) ----------
@@ -208,6 +212,9 @@ function parseDateUTC(s) { if (!s) return null; const [y, m, d] = s.split('-').m
 function daysInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
 function monthRangeUTC(monthStr) { const [y, m] = monthStr.split('-').map(Number); return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 0)]; }
 
+// Gesamte "bestellte" Stunden über die komplette Projektlaufzeit (Wochenstunden x Wochen).
+// Bei Perm-Projekten (Pauschalhonorar statt Stundenabrechnung) zählt immer genau 1 Stunde,
+// damit Umsatz = Stunden x Charge/h weiterhin die volle Rechnungssumme ergibt.
 function projectTotalSollHours(p) {
   if (p.projekttyp === 'perm') return p.start_date ? 1 : 0;
   const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
@@ -215,6 +222,8 @@ function projectTotalSollHours(p) {
   return round1((p.wochenstunden || 0) * daysInclusive(ps, pe) / 7);
 }
 
+// Anteil der Gesamtstunden, der auf einen bestimmten Monat entfällt (nach Tagesüberlappung).
+// Bei Perm-Projekten fällt die gesamte 1 Stunde in den Monat des Startdatums (= Placement-Monat).
 function projectMonthSollHours(p, monthStr) {
   if (p.projekttyp === 'perm') {
     return (p.start_date && p.start_date.slice(0, 7) === monthStr) ? 1 : 0;
@@ -241,6 +250,8 @@ function monthListForProject(p) {
   return out;
 }
 
+// Gleicht die SOLL-Einträge eines Projekts mit der berechneten Monatsverteilung ab.
+// Manuell überschriebene Monate (auto === false) werden dabei nicht angetastet.
 async function syncAutoSoll(proj) {
   const months = monthListForProject(proj);
   const monthSet = new Set(months);
@@ -286,6 +297,8 @@ function sumEntries(list) {
 }
 function entriesOf(kind) { return data.entries.filter(e => e.kind === kind); }
 
+// Gruppiert SOLL- und IST-Zahlen nach Kunde: Umsatz (Stunden x Charge/h), Kosten (Stunden x Pay/h)
+// und Rohertrag (Umsatz - Kosten), summiert über alle Projekte des Kunden.
 function customerBreakdown(sollEntries, istEntries) {
   const kunden = Array.from(new Set(data.projects.map(p => p.kunde))).sort();
   return kunden.map(k => {
@@ -320,6 +333,9 @@ function monthLabelEN(m) { const [y, mo] = m.split('-').map(Number); return MONT
 function consultant(id) { return data.consultants.find(c => c.id === id); }
 function consultantName(id) { const c = consultant(id); return c ? c.name : '–'; }
 
+// Umsatz, der einem Consultant aus einem Projekt zugerechnet wird: voll, wenn er alleine
+// oder mit sich selbst in beiden Rollen zugewiesen ist; halb, wenn zwei unterschiedliche
+// Consultants am Projekt hängen.
 function consultantShareForProject(p, consultantId) {
   const c1 = p.consultant1_id, c2 = p.consultant2_id;
   const involved = c1 === consultantId || c2 === consultantId;
@@ -328,6 +344,8 @@ function consultantShareForProject(p, consultantId) {
   return 1;
 }
 
+// Summe des einem Consultant zugerechneten Rohertrags (Umsatz - Kosten = Stunden x Marge/h) über
+// eine Liste von Entries (z.B. alle IST-Einträge eines Monats). Provision wird auf Rohertrag berechnet, nicht auf Umsatz.
 function attributedRevenue(consultantId, entries) {
   let total = 0;
   for (const e of entries) {
@@ -350,6 +368,8 @@ function monthsInQuarter(year, quarter) {
 }
 function quarterLabel(year, quarter) { return 'Q' + quarter + ' ' + year; }
 
+// Detail-Zeilen (pro Projekt/Freelancer) für die Provisionsabrechnung eines Consultants,
+// über eine gegebene Liste von IST-Einträgen (Monat oder ganzes Quartal).
 function projectRowsForConsultant(consultantId, entries) {
   const rows = [];
   for (const e of entries) {
@@ -366,6 +386,8 @@ function projectRowsForConsultant(consultantId, entries) {
   return rows.sort((a, b) => a.month === b.month ? a.kunde.localeCompare(b.kunde) : a.month.localeCompare(b.month));
 }
 
+// Druckbare Provisionsabrechnung für einen einzelnen Consultant (Monat) oder Team-Lead (Quartal),
+// zum Versenden an den Consultant. Wird statt der Übersicht gezeigt, solange reportConfig gesetzt ist.
 function consultantReportHTML() {
   const c = consultant(reportConfig.consultantId);
   if (!c) { reportConfig = null; return provisionenHTML(); }
@@ -375,6 +397,7 @@ function consultantReportHTML() {
   const qMonths = monthsInQuarter(qYear, qNum);
   const qEntries = istAll.filter(e => qMonths.includes(e.month));
 
+  // Reports gehen an Consultants raus, die meist nur Englisch sprechen – deshalb komplett auf Englisch.
   const actions = `
     <div class="toolbar no-print" style="justify-content:space-between;">
       <button class="btn" data-report-back="1">← Back to overview</button>
@@ -648,6 +671,8 @@ async function loadAll() {
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
+    // ki_vorschlaege ist optional – falls die Tabelle (noch) nicht existiert (Migration nicht ausgeführt),
+    // soll die App trotzdem normal weiterlaufen, nur der Tab "KI-Vorschläge" bleibt dann leer.
     sb.from('ki_vorschlaege').select('*').order('created_at', { ascending: false }),
   ]);
   if (e1 || e2 || e3) {
@@ -681,6 +706,11 @@ async function handleLogin(email, password) {
   authBusy = false;
   if (error) { authError = error.message; renderAuth(); }
 }
+// Nur @konzepthaus-consulting.com darf sich registrieren. Das ist nur die Frontend-Vorabprüfung
+// für eine sofortige, freundliche Fehlermeldung – die eigentliche Absicherung läuft serverseitig
+// über einen Datenbank-Trigger auf auth.users (siehe Einrichtungsanleitung/Migration), da der
+// anon key öffentlich ist und Registrierungen theoretisch auch direkt über die Supabase-API
+// versucht werden könnten.
 const ALLOWED_EMAIL_DOMAIN = 'konzepthaus-consulting.com';
 function isAllowedEmail(email) {
   return (email || '').toLowerCase().trim().endsWith('@' + ALLOWED_EMAIL_DOMAIN);
@@ -697,7 +727,7 @@ async function handleSignup(email, password) {
   const { data: res, error } = await sb.auth.signUp({ email, password });
   authBusy = false;
   if (error) { authError = error.message; renderAuth(); return; }
-  if (res.session) return;
+  if (res.session) return; // logged in immediately (email confirmation disabled)
   authInfo = 'Konto erstellt. Falls E-Mail-Bestätigung aktiviert ist, bitte den Link in deinem Postfach öffnen und dich danach anmelden.';
   authMode = 'login';
   renderAuth();
@@ -805,6 +835,8 @@ function dashboardHTML() {
   const ist = sumEntries(istEntries);
 
   const aktiveFreelancer = data.projects.filter(p => computedStatus(p) === 'Aktiv').length;
+  // Marge/h für Contract- und Perm-Projekte getrennt, da bei Perm die "Marge" die gesamte
+  // Pauschale abbildet und mit echten Stundensätzen nicht vergleichbar/mischbar ist.
   const margenContract = data.projects.filter(p => p.projekttyp !== 'perm').map(margeH).filter(v => v > 0);
   const avgMargeContract = margenContract.length ? margenContract.reduce((a, b) => a + b, 0) / margenContract.length : 0;
   const margenPerm = data.projects.filter(p => p.projekttyp === 'perm').map(margeH).filter(v => v > 0);
@@ -866,7 +898,7 @@ function dashboardHTML() {
     </div>
     <div class="card panel">
       <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
-        <h2 style="margin:0;">Monatstrend (IST vs. SOLL)</h2>
+        <h2 style="margin:0;">Monatstrend (IST)</h2>
         <div class="toolbar" style="margin:0;gap:14px;flex-wrap:wrap;">
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_umsatz" ${trendShow.umsatz ? 'checked' : ''}> Umsatz</label>
           <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="trendShow_kosten" ${trendShow.kosten ? 'checked' : ''}> Kosten</label>
@@ -883,6 +915,7 @@ function setupChart() {
   const sel = document.getElementById('dashMonthSel');
   if (sel) sel.addEventListener('change', () => { dashMonth = sel.value; render(); });
 
+  // Kunden-Tortendiagramm: IST-Umsatz-Verteilung über alle Kunden, innerhalb des oben gewählten Zeitraums.
   const kundeCtx = document.getElementById('kundeChart');
   if (kundeCtx) {
     const sollForChart = dashMonth === 'all' ? entriesOf('soll') : entriesOf('soll').filter(e => e.month === dashMonth);
@@ -901,6 +934,7 @@ function setupChart() {
     }
   }
 
+  // Checkboxen zur Auswahl, welche Kennzahlen im Monatstrend gezeigt werden (einzeln oder alle).
   ['umsatz', 'kosten', 'rohertrag'].forEach(key => {
     const cb = document.getElementById('trendShow_' + key);
     if (cb) cb.addEventListener('change', () => { trendShow[key] = cb.checked; render(); });
@@ -908,6 +942,11 @@ function setupChart() {
   const trendShowAllBtn = document.getElementById('trendShowAllBtn');
   if (trendShowAllBtn) trendShowAllBtn.addEventListener('click', () => { trendShow = { umsatz: true, kosten: true, rohertrag: true }; render(); });
 
+  // Monatstrend als Liniendiagramm: Umsatz, Kosten und Rohertrag (jeweils IST) in eigenen Farben,
+  // zusätzlich SOLL als gestrichelte Linie in einem Grauton je Kennzahl (heller/dunkler), damit man
+  // IST vs. SOLL für alle drei Kennzahlen auf einen Blick vergleichen kann.
+  // tension: 0 = gerade Linien zwischen den echten Monatswerten, damit zwischen Monaten ohne
+  // Daten keine unsinnigen "Hügel" durch Kurvenglättung entstehen.
   const months = allMonthsUsed();
   const istByMonth = months.map(m => sumEntries(entriesOf('ist').filter(e => e.month === m)));
   const sollByMonth = months.map(m => sumEntries(entriesOf('soll').filter(e => e.month === m)));
@@ -953,6 +992,9 @@ function setupChart() {
 
 // ---------- PROJEKTE ----------
 
+// Baut einen durchsuchbaren Text aus genau den Werten, die auch in der Projekte-Tabelle
+// angezeigt werden (Art, Kunde, Contractor, Daten, Zahlen, Consultants, Status) – so findet
+// die Suche wie in Excel jedes Wort, das irgendwo in der Zeile sichtbar ist.
 function projectSearchText(p) {
   const isPerm = p.projekttyp === 'perm';
   return [
@@ -973,6 +1015,8 @@ function projectSearchText(p) {
   ].join(' ').toLowerCase();
 }
 
+// Sortiert und filtert die Projektliste für die Projekte-Ansicht. Kunden werden dabei
+// immer alphabetisch einsortiert (bzw. per Sortier-Dropdown auch nach Start/Ende).
 function filteredSortedProjects() {
   let list = data.projects.slice();
   if (projFilterKunde !== 'all') list = list.filter(p => p.kunde === projFilterKunde);
@@ -1208,13 +1252,23 @@ async function deleteProject(id) {
 
 // ---------- SOLL / IST MONATSERFASSUNG ----------
 
+// Baut für einen gegebenen Monat/Kind (soll/ist) pro Projekt eine Zeile mit allen angezeigten
+// Werten (inkl. berechnetem Umsatz/Kosten/Rohertrag) – Basis sowohl für die Tabelle als auch
+// für die Excel-artige Volltextsuche und die Filter.
 function entryRows(kind, monthVal) {
   const entries = entriesOf(kind);
   const [monthStart, monthEnd] = monthRangeUTC(monthVal);
   return data.projects
     .filter(p => {
+      // Projekte, die erst nach diesem Monat starten, werden für diesen Monat gar nicht erst
+      // angezeigt (macht keinen Sinn, z.B. im Januar einen Contractor zu sehen, der erst zum
+      // 01.02. startet).
       const ps = parseDateUTC(p.start_date);
       if (ps !== null && ps > monthEnd) return false;
+      // Projekte, die vor diesem Monat schon beendet wurden: nur noch anzeigen, wenn es für
+      // genau diesen Monat bereits einen IST-Eintrag gibt (z.B. ein paar Reststunden kurz nach
+      // Vertragsende). So verschwinden alte, bereits erfasste Werte nicht, aber ein beendeter
+      // Contractor taucht nicht dauerhaft in jedem künftigen Monat als leere Zeile auf.
       const pe = parseDateUTC(p.end_date);
       if (pe !== null && pe < monthStart) {
         if (kind !== 'ist') return false;
@@ -1224,6 +1278,9 @@ function entryRows(kind, monthVal) {
     })
     .map(p => {
       const active = isActiveInMonth(p, monthVal);
+      // IST-Stunden sollen auch nachträglich für bereits beendete Contractor eintragbar sein
+      // (echte geleistete Stunden können außerhalb des geplanten Projektfensters liegen).
+      // Nur bei SOLL bleibt die Sperre, da SOLL automatisch aus der Projektlaufzeit berechnet wird.
       const editable = active || kind === 'ist';
       const entry = entries.find(e => e.project_id === p.id && e.month === monthVal);
       const stunden = entry ? entry.stunden : '';
@@ -1233,6 +1290,8 @@ function entryRows(kind, monthVal) {
     });
 }
 
+// Durchsuchbarer Text pro Zeile – analog zur Projekte-Suche, inkl. der für diesen Monat
+// berechneten Stunden/Umsatz/Kosten/Rohertrag, damit man z.B. auch nach Beträgen suchen kann.
 function entryRowSearchText(row) {
   return [
     row.isPerm ? 'Perm' : 'Contract',
@@ -1264,6 +1323,8 @@ function monthEntryHTML(kind) {
   const monthVal = kind === 'soll' ? sollMonth : istMonth;
   const kundenOptions = Array.from(new Set(data.projects.map(p => p.kunde))).sort((a, b) => a.localeCompare(b));
   const rows = filteredEntryRows(kind, monthVal);
+  // Summe bezieht sich bewusst auf die aktuell gefilterte/gesuchte Auswahl, damit man z.B. nach
+  // einem Kunden filtern und direkt dessen Summe für den Monat sehen kann.
   const totals = rows.reduce((acc, r) => {
     acc.stunden += r.c.stunden; acc.umsatz += r.c.umsatz; acc.kosten += r.c.kosten; acc.rohertrag += r.c.rohertrag;
     return acc;
@@ -1338,7 +1399,7 @@ async function setEntry(kind, projectId, monthVal, stunden) {
     }
   } else if (existing) {
     const patch = { stunden };
-    if (kind === 'soll') patch.auto = false;
+    if (kind === 'soll') patch.auto = false; // manuelle Änderung überschreibt die Automatik
     await sb.from('entries').update(patch).eq('id', existing.id);
   } else {
     const payload = { project_id: projectId, kind, month: monthVal, stunden };
@@ -1350,6 +1411,10 @@ async function setEntry(kind, projectId, monthVal, stunden) {
 
 // ---------- KI-VORSCHLÄGE (aus Weclapp-Rechnungen) ----------
 
+// Zeigt von der KI aus Weclapp-Eingangsrechnungen vorgeschlagene IST-Einträge (Contractor, Monat,
+// Stunden) zur Prüfung an. Erst nach "Übernehmen" wird daraus ein echter IST-Eintrag – die KI
+// schreibt nie direkt in die entries-Tabelle. Kommt aus einer separaten Supabase Edge Function
+// (siehe edge-functions/weclapp-sync und WECLAPP_KI_SETUP.md), die diese Tabelle befüllt.
 function kiVorschlaegeHTML() {
   const counts = {
     pending: data.ki_vorschlaege.filter(v => v.status === 'pending').length,
@@ -1390,7 +1455,7 @@ function kiVorschlaegeHTML() {
               <td>${v.rechnungsnummer || '–'}</td>
               <td>${v.contractor_raw || '–'}</td>
               <td>${isPending
-                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.projects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>${p.kunde} – ${p.contractor}</option>`).join('')}</select>`
+                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.projects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>${p.contractor} – ${p.kunde}</option>`).join('')}</select>`
                 : (matched ? `${matched.kunde} – ${matched.contractor}` : '<span class="empty" style="padding:0;">kein Projekt</span>')}</td>
               <td>${isPending ? `<input type="month" data-vid="${v.id}" data-field="month" value="${v.month || ''}">` : (v.month ? monthLabel(v.month) : '–')}</td>
               <td>${isPending ? `<input class="num-cell" type="number" step="0.5" min="0" data-vid="${v.id}" data-field="stunden" value="${v.stunden ?? ''}">` : fmtNum(v.stunden, 1)}</td>
@@ -1462,6 +1527,9 @@ function wireTabEvents() {
   if (projFilterResetBtn) projFilterResetBtn.addEventListener('click', () => { projFilterKunde = 'all'; projFilterStatus = 'all'; projFilterArt = 'all'; projFilterStartMonat = ''; projFilterEndeMonat = ''; projSearch = ''; render(); });
   const projSearchInput = document.getElementById('projSearchInput');
   if (projSearchInput) {
+    // Live-Filterung bei jedem Tastendruck (wie in Excel). Da render() die gesamte Tab-HTML
+    // neu aufbaut, geht der Fokus sonst nach jedem Zeichen verloren – deshalb Fokus/Cursor
+    // direkt nach dem Neu-Rendern wiederherstellen.
     projSearchInput.addEventListener('input', () => {
       projSearch = projSearchInput.value;
       render();
@@ -1491,6 +1559,8 @@ function wireTabEvents() {
     });
     const entrySearchInput = document.getElementById('entrySearchInput_' + kind);
     if (entrySearchInput) {
+      // Live-Filterung bei jedem Tastendruck (wie in Excel), inkl. Fokus-/Cursor-Wiederherstellung
+      // nach dem Neu-Rendern (siehe projSearchInput weiter oben für die gleiche Logik).
       entrySearchInput.addEventListener('input', () => {
         entrySearch[kind] = entrySearchInput.value;
         render();
@@ -1537,7 +1607,7 @@ function wireTabEvents() {
 sb.auth.onAuthStateChange((event, newSession) => {
   session = newSession;
   if (session) {
-    renderAuth();
+    renderAuth(); // clears any stale auth screen instantly, then app takes over
     document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>';
     subscribeRealtime();
     loadAll();
