@@ -124,6 +124,9 @@
 const SUPABASE_URL = 'https://uevefmvbpznvuvhvkdwl.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVldmVmbXZicHpudnV2aHZrZHdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyMjUzMTYsImV4cCI6MjEwMDgwMTMxNn0.ewGSI6UcXpInCL1z9VTqcqsGxBPd5Aqt4YUMulrml5E';
 /* ============================================================ */
+// Basis-URL des Weclapp-Webapp (nicht die API) – nur für Direktlinks zu Rechnungen im
+// Tab "KI-Vorschläge", kein Geheimnis (öffentlich sichtbare Web-Oberflächen-URL, kein API-Key).
+const WECLAPP_WEB_URL = 'https://konzepthaus.weclapp.com';
 
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -1415,6 +1418,14 @@ async function setEntry(kind, projectId, monthVal, stunden) {
 // Stunden) zur Prüfung an. Erst nach "Übernehmen" wird daraus ein echter IST-Eintrag – die KI
 // schreibt nie direkt in die entries-Tabelle. Kommt aus einer separaten Supabase Edge Function
 // (siehe edge-functions/weclapp-sync und WECLAPP_KI_SETUP.md), die diese Tabelle befüllt.
+
+// Direktlink zur Original-Rechnung in Weclapp, damit man beim Prüfen eines Vorschlags die
+// tatsächliche Rechnung danebenlegen kann. source_ref ist die Weclapp-purchaseInvoice-ID.
+function weclappInvoiceUrl(v) {
+  if (v.source !== 'weclapp' || !v.source_ref) return null;
+  return `${WECLAPP_WEB_URL}/app/purchase-invoice/${v.source_ref}`;
+}
+
 function kiVorschlaegeHTML() {
   const counts = {
     pending: data.ki_vorschlaege.filter(v => v.status === 'pending').length,
@@ -1450,9 +1461,10 @@ function kiVorschlaegeHTML() {
           ${list.map(v => {
             const matched = v.project_id ? project(v.project_id) : null;
             const isPending = v.status === 'pending';
+            const invoiceUrl = weclappInvoiceUrl(v);
             return `
             <tr>
-              <td>${v.rechnungsnummer || '–'}</td>
+              <td>${v.rechnungsnummer || '–'}${invoiceUrl ? ` <a href="${invoiceUrl}" target="_blank" rel="noopener" title="Original-Rechnung in Weclapp öffnen" style="text-decoration:none;">📄</a>` : ''}</td>
               <td>${v.contractor_raw || '–'}</td>
               <td>${isPending
                 ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.projects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>${p.contractor} – ${p.kunde}</option>`).join('')}</select>`
