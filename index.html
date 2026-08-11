@@ -826,25 +826,40 @@ function openContractorModal(id) {
 
 function renderContractorModal(c) {
   const v = c.values;
-  // Projekte/Kunden der aktuellen Firma, die diesem Contractor zugeordnet werden können -
-  // Mehrfachauswahl (n:m über contractor_projects), da z.B. bei Siemens mehrere Contractors
-  // auf demselben Projekt arbeiten und ein Contractor auch mehrere Projekte haben kann.
-  // Als aufklappbarer Kunde->Projekte-Baum statt einer langen, flachen Liste, damit es bei
-  // vielen Projekten übersichtlich bleibt - inkl. Suche nach Kunde und einem automatischen
-  // Vorschlag, falls der Contractor-Name schon im Freitextfeld "Contractor" eines Projekts steht.
+  // Die Kunde/Projekt-Auswahl kommt bewusst aus dem CRM (Tab "CRM"), nicht direkt aus dem
+  // Tab "Projekte": dort werden die konkreten Subprojekte pro Kunde angelegt (candidates.kunde
+  // + candidates.projekt_name) - das Projekte-Sheet selbst ist zu allgemein gefasst, um darauf
+  // ein Timesheet sinnvoll aufzuteilen. Ein Kandidat muss dafür schon per "Projekt erzeugen" im
+  // CRM mit einem echten Projekt verknüpft sein (candidates.linked_project_id) - erst dann kann
+  // ein Contractor auch tatsächlich Stunden dagegen buchen (contractor_projects zeigt technisch
+  // weiterhin auf projects.id, die Anzeige/Gruppierung kommt aber aus den CRM-Kandidaten).
   const assignedIds = c.id ? new Set(data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => cp.project_id)) : new Set();
   if (!c.pickerChecked) c.pickerChecked = new Set(assignedIds);
 
+  const candidatesOfOrg = data.candidates; // schon serverseitig auf activeOrg gefiltert (siehe loadAll)
   const byKunde = new Map();
-  data.projects.forEach(p => { if (!byKunde.has(p.kunde)) byKunde.set(p.kunde, []); byKunde.get(p.kunde).push(p); });
+  candidatesOfOrg.forEach(cd => {
+    const key = (cd.kunde || '').trim();
+    if (!byKunde.has(key)) byKunde.set(key, []);
+    byKunde.get(key).push(cd);
+  });
 
   const nameNorm = (v.name || '').trim().toLowerCase();
   const suggestedKunden = new Set();
-  if (nameNorm) data.projects.forEach(p => { if ((p.contractor || '').trim().toLowerCase() === nameNorm) suggestedKunden.add(p.kunde); });
-  if (!c.pickerExpandedInit) { suggestedKunden.forEach(k => c.pickerExpanded.add(k)); c.pickerExpandedInit = true; }
+  if (nameNorm) candidatesOfOrg.forEach(cd => { if ((cd.contractor || '').trim().toLowerCase() === nameNorm) suggestedKunden.add((cd.kunde || '').trim()); });
+  // Kunden von bereits angehakten Projekten (auch wenn gerade erst über die Suche
+  // dazugewählt) bleiben immer sichtbar, damit eine Auswahl nicht verschwindet, sobald
+  // die Suche wieder leer ist.
+  const checkedKunden = new Set();
+  candidatesOfOrg.forEach(cd => { if (cd.linked_project_id && c.pickerChecked.has(cd.linked_project_id)) checkedKunden.add((cd.kunde || '').trim()); });
+  // Standardmäßig (ohne Suche) nur die zu diesem Contractor passenden Kunden zeigen - nicht
+  // die komplette Kundenliste der Firma. Andere Kunden findet man über die Suche.
+  const defaultKunden = new Set([...suggestedKunden, ...checkedKunden]);
+  if (!c.pickerExpandedInit) { defaultKunden.forEach(k => c.pickerExpanded.add(k)); c.pickerExpandedInit = true; }
 
   const search = (c.pickerSearch || '').trim().toLowerCase();
-  const kundenList = Array.from(byKunde.keys()).sort((a, b) => a.localeCompare(b)).filter(k => !search || k.toLowerCase().includes(search));
+  const kundenList = Array.from(byKunde.keys()).sort((a, b) => a.localeCompare(b))
+    .filter(k => search ? k.toLowerCase().includes(search) : defaultKunden.has(k));
 
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -855,12 +870,12 @@ function renderContractorModal(c) {
       <div class="field"><label>E-Mail (für den Timesheet-Login)</label><input type="text" id="ctf_email" value="${v.email || ''}" placeholder="freelancer@beispiel.com"></div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Sobald hier eine E-Mail hinterlegt ist, kann sich die Person auf der normalen Login-Seite mit "Registrieren" selbst einen Zugang anlegen (mit genau dieser E-Mail) und sieht danach nur ihr eigenes Timesheet.</div>
       <div class="field">
-        <label>Projekte / Kunden (worauf dieser Contractor Stunden buchen darf)</label>
-        <input type="text" id="ctf_picker_search" placeholder="🔍 Kunde suchen…" value="${c.pickerSearch || ''}" style="width:100%;margin-bottom:8px;">
+        <label>Kunde / Subprojekte aus dem CRM (worauf dieser Contractor Stunden buchen darf)</label>
+        <input type="text" id="ctf_picker_search" placeholder="🔍 weiteren Kunden suchen…" value="${c.pickerSearch || ''}" style="width:100%;margin-bottom:8px;">
         <div style="display:flex;flex-direction:column;gap:2px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;max-height:260px;overflow:auto;">
           ${kundenList.length ? kundenList.map(kunde => {
-            const projectsOfKunde = byKunde.get(kunde);
-            const checkedCount = projectsOfKunde.filter(p => c.pickerChecked.has(p.id)).length;
+            const candidatesOfKunde = byKunde.get(kunde);
+            const checkedCount = candidatesOfKunde.filter(cd => cd.linked_project_id && c.pickerChecked.has(cd.linked_project_id)).length;
             const expanded = c.pickerExpanded.has(kunde) || !!search;
             const isSuggested = suggestedKunden.has(kunde);
             return `
@@ -873,15 +888,18 @@ function renderContractorModal(c) {
               </div>
               ${expanded ? `
               <div style="padding-left:26px;display:flex;flex-direction:column;gap:4px;margin-bottom:4px;">
-                ${projectsOfKunde.map(p => `
+                ${candidatesOfKunde.map(cd => cd.linked_project_id ? `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
-                    <input type="checkbox" class="ctf_project" value="${p.id}" ${c.pickerChecked.has(p.id) ? 'checked' : ''}> ${p.projektname || p.contractor}
+                    <input type="checkbox" class="ctf_project" value="${cd.linked_project_id}" ${c.pickerChecked.has(cd.linked_project_id) ? 'checked' : ''}> ${cd.projekt_name || cd.contractor}
+                  </label>` : `
+                  <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;color:var(--muted);" title="Im CRM erst auf 'Projekt erzeugen' klicken, bevor darauf gebucht werden kann">
+                    <input type="checkbox" disabled> ${cd.projekt_name || cd.contractor} (noch kein Projekt erzeugt)
                   </label>`).join('')}
               </div>` : ''}
             </div>`;
-          }).join('') : '<span class="empty" style="padding:0;">keine passenden Kunden</span>'}
+          }).join('') : `<span class="empty" style="padding:0;">${search ? 'keine passenden Kunden' : 'kein passender Kunde anhand des Namens gefunden – oben nach dem Kunden suchen'}</span>`}
         </div>
-        <div class="empty" style="text-align:left;padding:6px 0 0;">Mehrfachauswahl möglich – auch wenn ein Projekt schon einem anderen Contractor zugeordnet ist (z.B. bei mehreren Freelancern auf demselben Kunden-Projekt).</div>
+        <div class="empty" style="text-align:left;padding:6px 0 0;">Subprojekte werden im Tab "CRM" pro Kunde angelegt. Es werden nur die zum Namen passenden Kunden angezeigt - über die Suche oben findest du auch andere.</div>
       </div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDeleteContractor">Löschen</button>' : ''}
