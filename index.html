@@ -139,7 +139,7 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [] };
 // Mehrfirmen-Unterstützung (KH + peax): allowedOrgs kommt aus der Tabelle user_access
 // (welche Firmen darf diese E-Mail-Adresse sehen - siehe migration_multi_org.sql).
 // activeOrg ist die aktuell angezeigte Firma; data.projects/entries/consultants werden
@@ -384,6 +384,27 @@ function monthsInQuarter(year, quarter) {
   return [0, 1, 2].map(i => year + '-' + String(startM + i).padStart(2, '0'));
 }
 function quarterLabel(year, quarter) { return 'Q' + quarter + ' ' + year; }
+function monthsInYear(year) { return Array.from({ length: 12 }, (_, i) => year + '-' + String(i + 1).padStart(2, '0')); }
+function yearOfMonth(monthStr) { return Number(monthStr.split('-')[0]); }
+
+// Team-Mitglieder eines Team-Leads, aus team_memberships (nicht mehr über ein einzelnes
+// team_lead_id-Feld auf dem Mitglied) - so kann eine Person gleichzeitig bei mehreren
+// Team-Boni mitzählen (z.B. bei peax Erik/Georg bei Sam UND bei Valentin).
+function teamMembersOf(leadId) {
+  const ids = new Set(data.team_memberships.filter(tm => tm.team_lead_id === leadId).map(tm => tm.member_id));
+  return data.consultants.filter(c => ids.has(c.id));
+}
+
+// Zeitraum-Fenster für den Team-Bonus eines Leads, je nach team_rate_period
+// ('quarterly' oder 'yearly'), bezogen auf den im Provisionen-Tab gewählten Monat.
+function periodWindowFor(lead, refMonth) {
+  if (lead.team_rate_period === 'yearly') {
+    const year = yearOfMonth(refMonth);
+    return { months: monthsInYear(year), label: String(year) };
+  }
+  const { year, quarter } = quarterOfMonth(refMonth);
+  return { months: monthsInQuarter(year, quarter), label: quarterLabel(year, quarter) };
+}
 
 // Detail-Zeilen (pro Projekt/Freelancer) für die Provisionsabrechnung eines Consultants,
 // über eine gegebene Liste von IST-Einträgen (Monat oder ganzes Quartal).
@@ -410,9 +431,6 @@ function consultantReportHTML() {
   if (!c) { reportConfig = null; return provisionenHTML(); }
   const istAll = entriesOf('ist');
   const monthEntries = istAll.filter(e => e.month === provMonth);
-  const { year: qYear, quarter: qNum } = quarterOfMonth(provMonth);
-  const qMonths = monthsInQuarter(qYear, qNum);
-  const qEntries = istAll.filter(e => qMonths.includes(e.month));
 
   // Reports gehen an Consultants raus, die meist nur Englisch sprechen – deshalb komplett auf Englisch.
   const actions = `
@@ -454,15 +472,17 @@ function consultantReportHTML() {
     `;
   }
 
-  const members = data.consultants.filter(m => m.team_lead_id === c.id);
+  const { months: periodMonths, label: periodLabel } = periodWindowFor(c, provMonth);
+  const periodEntries = istAll.filter(e => periodMonths.includes(e.month));
+  const members = teamMembersOf(c.id);
   let teamTotal = 0;
   const memberBlocks = members.map(m => {
-    const rows = projectRowsForConsultant(m.id, qEntries);
+    const rows = projectRowsForConsultant(m.id, periodEntries);
     const subtotal = rows.reduce((s, r) => s + r.rohertragAnteil, 0);
     teamTotal += subtotal;
     return `
       <h3 style="font-size:13.5px;margin:16px 0 8px;">${m.name}</h3>
-      ${!rows.length ? '<div class="empty" style="padding:6px 0;">No projects/actual hours this quarter.</div>' : `
+      ${!rows.length ? '<div class="empty" style="padding:6px 0;">No projects/actual hours this period.</div>' : `
       <div class="table-scroll">
       <table>
         <thead><tr><th>Month</th><th>Client</th><th>Freelancer</th><th>Share</th><th>Actual Hours</th><th>Gross Profit (100%)</th><th>Attributed Gross Profit</th></tr></thead>
@@ -488,10 +508,10 @@ function consultantReportHTML() {
     <div class="card panel">
       ${actions}
       <h2 style="margin-bottom:2px;">Team Commission Statement – ${c.name}</h2>
-      <div class="sub" style="margin-bottom:16px;">${quarterLabel(qYear, qNum)} (${qMonths.map(monthLabelEN).join(', ')}) · Rate ${fmtPct(c.team_rate)} on the team's actual gross profit</div>
+      <div class="sub" style="margin-bottom:16px;">${periodLabel} · Rate ${fmtPct(c.team_rate)} on the team's actual gross profit</div>
       ${!members.length ? '<div class="empty">No team members assigned.</div>' : memberBlocks}
       <div style="margin-top:18px;padding-top:14px;border-top:2px solid var(--border);font-weight:700;display:flex;justify-content:space-between;">
-        <span>Total Team Gross Profit (${quarterLabel(qYear, qNum)})</span><span>${fmtEUR(teamTotal)}</span>
+        <span>Total Team Gross Profit (${periodLabel})</span><span>${fmtEUR(teamTotal)}</span>
       </div>
       <div style="margin-top:6px;font-weight:700;display:flex;justify-content:space-between;color:var(--blue);">
         <span>Commission to ${c.name} (${fmtPct(c.team_rate)})</span><span>${fmtEUR(commission)}</span>
@@ -503,11 +523,12 @@ function consultantReportHTML() {
 function provisionenHTML() {
   const istAll = entriesOf('ist');
   const monthEntries = istAll.filter(e => e.month === provMonth);
-  const teamLeads = data.consultants.filter(c => c.is_team_lead);
-  const individuals = data.consultants.filter(c => !c.is_team_lead);
-  const { year: qYear, quarter: qNum } = quarterOfMonth(provMonth);
-  const qMonths = monthsInQuarter(qYear, qNum);
-  const qEntries = istAll.filter(e => qMonths.includes(e.month));
+  // "Provisionsberechtigt" schließt Consultants ohne jede Provision aus (Satz 0 und kein
+  // Team-Lead) - z.B. bei peax Daniel und Marketing, die laut Rike gar keine Provision
+  // bekommen, aber trotzdem als Consultant für die Projektzuordnung existieren.
+  const provisionRelevant = data.consultants.filter(c => c.is_team_lead || c.rate > 0);
+  const teamLeads = provisionRelevant.filter(c => c.is_team_lead);
+  const individuals = provisionRelevant.filter(c => !c.is_team_lead);
 
   return `
     <div class="card panel">
@@ -518,17 +539,23 @@ function provisionenHTML() {
       ${!data.consultants.length ? '<div class="empty">Noch keine Consultants angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Name</th><th>Provisionssatz</th><th>Team-Lead</th><th>Team-Satz (Quartal)</th><th>Teil von Team</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Provisionssatz</th><th>Team-Lead</th><th>Team-Bonus</th><th>Teams</th><th></th></tr></thead>
         <tbody>
-          ${data.consultants.map(c => `
+          ${data.consultants.map(c => {
+            const asLeadMembers = c.is_team_lead ? teamMembersOf(c.id) : [];
+            const memberOfLeads = data.team_memberships.filter(tm => tm.member_id === c.id).map(tm => consultantName(tm.team_lead_id));
+            return `
             <tr>
               <td>${c.name}</td>
               <td>${fmtPct(c.rate)}</td>
               <td>${c.is_team_lead ? '<span class="badge Aktiv">Ja</span>' : '–'}</td>
-              <td>${c.is_team_lead ? fmtPct(c.team_rate) : '–'}</td>
-              <td>${c.team_lead_id ? consultantName(c.team_lead_id) : '–'}</td>
+              <td>${c.is_team_lead ? `${fmtPct(c.team_rate)} / ${c.team_rate_period === 'yearly' ? 'Jahr' : 'Quartal'}` : '–'}</td>
+              <td>${c.is_team_lead
+                ? (asLeadMembers.length ? asLeadMembers.map(m => m.name).join(', ') : '<span class="empty" style="padding:0;">keine Mitglieder</span>')
+                : (memberOfLeads.length ? memberOfLeads.join(', ') : '–')}</td>
               <td><button class="link" data-edit-consultant="${c.id}">Bearbeiten</button> <button class="link danger" data-del-consultant="${c.id}">Löschen</button></td>
-            </tr>`).join('')}
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>
       </div>`}
@@ -565,20 +592,19 @@ function provisionenHTML() {
 
     <div class="card panel">
       <h2>Rohertrag pro Mitarbeiter</h2>
-      <div class="empty" style="padding-top:0;text-align:left;">Rohertrag (Stunden × Marge/h) je Consultant – Basis für alle Provisionen, inkl. Chaks 5%-Team-Berechnung. Bei geteilten Projekten (2 Consultants) wird der Rohertrag jeweils zur Hälfte angerechnet.</div>
-      ${!data.consultants.length ? '<div class="empty">Noch keine Consultants angelegt.</div>' : `
+      <div class="empty" style="padding-top:0;text-align:left;">Rohertrag (Stunden × Marge/h) je Consultant – Basis für alle Provisionen inkl. Team-Boni. Bei geteilten Projekten (2 Consultants) wird der Rohertrag jeweils zur Hälfte angerechnet.</div>
+      ${!provisionRelevant.length ? '<div class="empty">Keine provisionsberechtigten Consultants angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Consultant</th><th>Team</th><th>Rohertrag ${monthLabel(provMonth)}</th><th>Rohertrag ${quarterLabel(qYear, qNum)}</th></tr></thead>
+        <thead><tr><th>Consultant</th><th>Teil von Team(s)</th><th>Rohertrag ${monthLabel(provMonth)}</th></tr></thead>
         <tbody>
-          ${data.consultants.map(c => {
+          ${provisionRelevant.map(c => {
             const revMonth = attributedRevenue(c.id, monthEntries);
-            const revQuarter = attributedRevenue(c.id, qEntries);
+            const memberOfLeads = data.team_memberships.filter(tm => tm.member_id === c.id).map(tm => consultantName(tm.team_lead_id));
             return `<tr>
               <td><strong>${c.name}</strong>${c.is_team_lead ? ' <span class="badge Aktiv">Team-Lead</span>' : ''}</td>
-              <td>${c.team_lead_id ? consultantName(c.team_lead_id) : '–'}</td>
+              <td>${memberOfLeads.length ? memberOfLeads.join(', ') : '–'}</td>
               <td>${fmtEUR(revMonth)}</td>
-              <td>${fmtEUR(revQuarter)}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -587,19 +613,22 @@ function provisionenHTML() {
     </div>
 
     <div class="card panel">
-      <h2>Team-Provision (Quartal) – ${quarterLabel(qYear, qNum)}</h2>
-      <div class="empty" style="padding-top:0;text-align:left;">Team-Leads erhalten statt der monatlichen 15% einen eigenen Satz auf den IST-Rohertrag ihres gesamten Teams, summiert über das Quartal (${qMonths.map(monthLabel).join(', ')}).</div>
+      <h2>Team-Provision</h2>
+      <div class="empty" style="padding-top:0;text-align:left;">Team-Leads bekommen einen eigenen Satz auf den IST-Rohertrag bestimmter Team-Mitglieder - je Team-Lead entweder pro Quartal oder einmal pro Jahr abgerechnet (einstellbar über "Bearbeiten" beim jeweiligen Consultant).</div>
       ${!teamLeads.length ? '<div class="empty">Kein Team-Lead angelegt.</div>' : `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Team-Lead</th><th>Team-Mitglieder</th><th>Team-Rohertrag (Quartal)</th><th>Satz</th><th>Provision ${quarterLabel(qYear, qNum)}</th><th></th></tr></thead>
+        <thead><tr><th>Team-Lead</th><th>Zeitraum</th><th>Team-Mitglieder</th><th>Team-Rohertrag</th><th>Satz</th><th>Provision</th><th></th></tr></thead>
         <tbody>
           ${teamLeads.map(lead => {
-            const members = data.consultants.filter(c => c.team_lead_id === lead.id);
-            const teamRev = members.reduce((sum, m) => sum + attributedRevenue(m.id, qEntries), 0);
+            const { months: periodMonths, label: periodLabel } = periodWindowFor(lead, provMonth);
+            const periodEntries = istAll.filter(e => periodMonths.includes(e.month));
+            const members = teamMembersOf(lead.id);
+            const teamRev = members.reduce((sum, m) => sum + attributedRevenue(m.id, periodEntries), 0);
             const commission = teamRev * (lead.team_rate || 0);
             return `<tr>
               <td><strong>${lead.name}</strong></td>
+              <td>${periodLabel}</td>
               <td>${members.length ? members.map(m => m.name).join(', ') : '<span class="empty" style="padding:0;">keine Mitglieder zugewiesen</span>'}</td>
               <td>${fmtEUR(teamRev)}</td>
               <td>${fmtPct(lead.team_rate)}</td>
@@ -620,7 +649,7 @@ function openConsultantModal(id) {
     type: 'consultant', id: id || null,
     // Neue Consultants gehören automatisch zur aktuell angezeigten Firma (activeOrg) - siehe
     // Kommentar bei openProjectModal für die gleiche Logik bei Projekten.
-    values: c ? { ...c } : { org: activeOrg, name: '', rate: 0.15, is_team_lead: false, team_rate: 0.05, team_lead_id: '' },
+    values: c ? { ...c } : { org: activeOrg, name: '', rate: 0.15, is_team_lead: false, team_rate: 0.05, team_rate_period: 'quarterly' },
   };
   render();
 }
@@ -628,6 +657,10 @@ function openConsultantModal(id) {
 function renderConsultantModal(c) {
   const v = c.values;
   const otherConsultants = data.consultants.filter(x => x.id !== c.id);
+  // Aktuelle Team-Mitglieder dieses Consultants (nur relevant, falls er/sie Team-Lead ist) -
+  // aus team_memberships, nicht mehr über ein einzelnes Feld auf dem Mitglied selbst, damit
+  // eine Person gleichzeitig bei mehreren Team-Boni mitzählen kann (z.B. Erik bei Sam UND Valentin).
+  const currentMemberIds = c.id ? new Set(data.team_memberships.filter(tm => tm.team_lead_id === c.id).map(tm => tm.member_id)) : new Set();
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
   overlay.innerHTML = `
@@ -636,21 +669,33 @@ function renderConsultantModal(c) {
       <div class="field"><label>Name</label><input type="text" id="cf_name" value="${v.name || ''}"></div>
       <div class="field-row">
         <div class="field"><label>Provisionssatz (monatlich, individuell)</label><input type="number" step="0.01" id="cf_rate" value="${v.rate}"></div>
-        <div class="field"><label>Teil von Team (optional)</label>
-          <select id="cf_team_lead_id">
-            <option value="">– kein Team –</option>
-            ${otherConsultants.filter(x => x.is_team_lead).map(x => `<option value="${x.id}" ${v.team_lead_id === x.id ? 'selected' : ''}>${x.name}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div class="field-row">
         <div class="field"><label>Ist Team-Lead?</label>
           <select id="cf_is_team_lead">
             <option value="false" ${!v.is_team_lead ? 'selected' : ''}>Nein</option>
             <option value="true" ${v.is_team_lead ? 'selected' : ''}>Ja</option>
           </select>
         </div>
-        <div class="field"><label>Team-Satz (quartalsweise, nur falls Team-Lead)</label><input type="number" step="0.01" id="cf_team_rate" value="${v.team_rate}"></div>
+      </div>
+      <div id="cf_team_lead_fields" style="display:${v.is_team_lead ? '' : 'none'};">
+        <div class="field-row">
+          <div class="field"><label>Team-Satz</label><input type="number" step="0.01" id="cf_team_rate" value="${v.team_rate}"></div>
+          <div class="field"><label>Abrechnungszeitraum</label>
+            <select id="cf_team_rate_period">
+              <option value="quarterly" ${v.team_rate_period !== 'yearly' ? 'selected' : ''}>Pro Quartal</option>
+              <option value="yearly" ${v.team_rate_period === 'yearly' ? 'selected' : ''}>Einmal pro Jahr</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Team-Mitglieder (deren Rohertrag für diesen Bonus zählt)</label>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;border:1px solid var(--border);border-radius:8px;padding:10px;">
+            ${otherConsultants.length ? otherConsultants.map(x => `
+              <label style="display:flex;align-items:center;gap:5px;font-size:13px;font-weight:400;margin:0;">
+                <input type="checkbox" class="cf_team_member" value="${x.id}" ${currentMemberIds.has(x.id) ? 'checked' : ''}> ${x.name}
+              </label>`).join('') : '<span class="empty" style="padding:0;">keine anderen Consultants vorhanden</span>'}
+          </div>
+          <div class="empty" style="text-align:left;padding:6px 0 0;">Eine Person kann gleichzeitig bei mehreren Team-Leads als Mitglied angehakt sein - ihr Rohertrag zählt dann unabhängig bei jedem Bonus mit.</div>
+        </div>
       </div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDeleteConsultant">Löschen</button>' : ''}
@@ -659,6 +704,13 @@ function renderConsultantModal(c) {
       </div>
     </div>`;
   document.getElementById('app').appendChild(overlay);
+
+  const isTeamLeadSel = document.getElementById('cf_is_team_lead');
+  const teamLeadFields = document.getElementById('cf_team_lead_fields');
+  isTeamLeadSel.addEventListener('change', () => {
+    teamLeadFields.style.display = isTeamLeadSel.value === 'true' ? '' : 'none';
+  });
+
   document.getElementById('modalCancelConsultant').addEventListener('click', () => { modalConfig = null; render(); });
   if (c.id) document.getElementById('modalDeleteConsultant').addEventListener('click', () => deleteConsultant(c.id));
   document.getElementById('modalSaveConsultant').addEventListener('click', async () => {
@@ -668,10 +720,28 @@ function renderConsultantModal(c) {
       rate: Number(document.getElementById('cf_rate').value) || 0,
       is_team_lead: document.getElementById('cf_is_team_lead').value === 'true',
       team_rate: Number(document.getElementById('cf_team_rate').value) || 0,
-      team_lead_id: document.getElementById('cf_team_lead_id').value || null,
+      team_rate_period: document.getElementById('cf_team_rate_period').value === 'yearly' ? 'yearly' : 'quarterly',
     };
-    if (c.id) await sb.from('consultants').update(payload).eq('id', c.id);
-    else await sb.from('consultants').insert(payload);
+    const checkedMemberIds = Array.from(document.querySelectorAll('.cf_team_member:checked')).map(el => el.value);
+    let consultantId = c.id;
+    if (c.id) {
+      await sb.from('consultants').update(payload).eq('id', c.id);
+    } else {
+      const { data: inserted } = await sb.from('consultants').insert(payload).select().single();
+      consultantId = inserted ? inserted.id : null;
+    }
+    // Team-Mitgliedschaften abgleichen (nur relevant, falls dieser Consultant Team-Lead ist) -
+    // bestehende entfernen, die nicht mehr angehakt sind, neue hinzufügen. Falls die Migration
+    // migration_team_bonus.sql noch nicht ausgeführt wurde, schlagen diese Calls einfach fehl,
+    // ohne die App zu blockieren (Consultant selbst ist dann trotzdem gespeichert).
+    if (consultantId) {
+      const { data: existing } = await sb.from('team_memberships').select('*').eq('team_lead_id', consultantId);
+      const existingIds = new Set((existing || []).map(tm => tm.member_id));
+      const toRemove = (existing || []).filter(tm => !checkedMemberIds.includes(tm.member_id));
+      const toAdd = checkedMemberIds.filter(id => !existingIds.has(id));
+      for (const tm of toRemove) await sb.from('team_memberships').delete().eq('id', tm.id);
+      for (const memberId of toAdd) await sb.from('team_memberships').insert({ team_lead_id: consultantId, member_id: memberId });
+    }
     modalConfig = null;
     await loadAll();
   });
@@ -691,13 +761,16 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
     // ki_vorschlaege ist optional – falls die Tabelle (noch) nicht existiert (Migration nicht ausgeführt),
     // soll die App trotzdem normal weiterlaufen, nur der Tab "KI-Vorschläge" bleibt dann leer.
     sb.from('ki_vorschlaege').select('*').order('created_at', { ascending: false }),
+    // team_memberships ist ebenfalls optional (siehe migration_team_bonus.sql) - ohne die Migration
+    // bleiben Team-Boni einfach leer, statt die App zum Absturz zu bringen.
+    sb.from('team_memberships').select('*'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -705,12 +778,14 @@ async function loadAll() {
     return;
   }
   if (e4) console.warn('ki_vorschlaege konnte nicht geladen werden (Migration ausgeführt?)', e4);
+  if (e5) console.warn('team_memberships konnte nicht geladen werden (migration_team_bonus.sql ausgeführt?)', e5);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
   data.entries = (entries || []).filter(e => projectIds.has(e.project_id));
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   data.ki_vorschlaege = kiVorschlaege || [];
+  data.team_memberships = teamMemberships || [];
   render();
 }
 
