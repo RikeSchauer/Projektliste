@@ -14,17 +14,28 @@
     --amber: #b45309; --amber-bg: #fef3e2;
     --green: #15803d; --green-bg: #e8f7ec;
     --red: #b91c1c; --red-bg: #fdeaea;
+    /* Marken-Design: KH = Gelb, peax = Orange/Rot (wie auf den Rechnungsvorlagen).
+       --accent-bar ist der reine Markenfarbton (für den Header-Balken/Badges),
+       --accent-ink ist eine textlesbare Variante davon (für Links, aktive Tabs, Buttons) -
+       bei KH ist reines Gelb auf Weiß kaum lesbar, deshalb dort ein dunkleres Gold als Ink. */
+    --accent-bar: #FFEC14; --accent-ink: #92720b; --accent-bg: #fdf6d8;
   }
+  body[data-org="peax"] { --accent-bar: #FE4700; --accent-ink: #FE4700; --accent-bg: #ffece3; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+  body { margin: 6px 0 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+  body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: 6px; background: var(--accent-bar); z-index: 100; }
   #app { max-width: 1900px; margin: 0 auto; padding: 20px 24px 60px; }
   header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
+  .brand-row { display: flex; align-items: center; gap: 14px; }
+  .peax-wordmark { font-size: 26px; font-weight: 300; letter-spacing: -.5px; color: var(--text); line-height: 1; }
+  .peax-wordmark .tag { display: block; font-size: 9px; font-weight: 700; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
+  .kh-wordmark { font-size: 17px; font-weight: 800; letter-spacing: .02em; color: var(--text); line-height: 1.05; padding-left: 10px; border-left: 6px solid var(--accent-bar); }
   h1 { font-size: 20px; margin: 0; font-weight: 700; }
   .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
   .userbar { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
   nav.tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
   nav.tabs button { background: none; border: none; padding: 10px 16px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-  nav.tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
+  nav.tabs button.active { color: var(--accent-ink); border-bottom-color: var(--accent-ink); }
   nav.tabs button:hover { color: var(--text); }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(20,20,43,.03); }
   .grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
@@ -76,10 +87,10 @@
   input.num-cell { width: 90px; padding: 5px 7px; }
   button.btn { font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; cursor: pointer; color: var(--text); }
   button.btn:hover { background: #f2f4f9; }
-  button.btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
-  button.btn.primary:hover { background: #1d4ed8; }
+  button.btn.primary { background: var(--accent-ink); color: #fff; border-color: var(--accent-ink); }
+  button.btn.primary:hover { filter: brightness(.9); }
   button.btn.danger { color: var(--red); }
-  button.link { background: none; border: none; color: var(--blue); font-size: 12.5px; cursor: pointer; padding: 2px 4px; font-weight: 600; }
+  button.link { background: none; border: none; color: var(--accent-ink); font-size: 12.5px; cursor: pointer; padding: 2px 4px; font-weight: 600; }
   button.link.danger { color: var(--red); }
   .chart-wrap { position: relative; height: 280px; }
   .overlay { position: fixed; inset: 0; background: rgba(20,20,43,.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
@@ -876,6 +887,7 @@ async function handleLogout() {
 // ---------- RENDER: AUTH SCREEN ----------
 
 function renderAuth() {
+  document.body.dataset.org = '';
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="auth-wrap">
@@ -920,12 +932,18 @@ function renderError(msg) {
 // ---------- RENDER: APP ----------
 
 function render() {
+  document.body.dataset.org = activeOrg || '';
   const app = document.getElementById('app');
   app.innerHTML = `
     <header class="top">
-      <div>
-        <h1>Projektliste – ${ORG_LABELS[activeOrg] || activeOrg} Freelancer Dashboard</h1>
-        <div class="sub">Projekte, SOLL/IST-Erfassung &amp; Kennzahlen – live geteilt im Team</div>
+      <div class="brand-row">
+        ${activeOrg === 'peax'
+          ? `<div class="peax-wordmark">peax<span class="tag">A Konzepthaus Brand</span></div>`
+          : `<div class="kh-wordmark">KONZEPT<br>HAUS</div>`}
+        <div>
+          <h1>Projektliste – ${ORG_LABELS[activeOrg] || activeOrg} Freelancer Dashboard</h1>
+          <div class="sub">Projekte, SOLL/IST-Erfassung &amp; Kennzahlen – live geteilt im Team</div>
+        </div>
       </div>
       <div class="userbar">
         ${allowedOrgs.length > 1 ? `
