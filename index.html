@@ -240,28 +240,41 @@ function parseDateUTC(s) { if (!s) return null; const [y, m, d] = s.split('-').m
 function daysInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
 function monthRangeUTC(monthStr) { const [y, m] = monthStr.split('-').map(Number); return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 0)]; }
 
-// Gesamte "bestellte" Stunden über die komplette Projektlaufzeit (Wochenstunden x Wochen).
+// Gesamte "bestellte" Stunden über die komplette Projektlaufzeit. Bei KH: Std./Woche x Wochen.
+// Bei peax gibt es kein Std./Woche - dort steht die Gesamtstundenzahl bereits direkt in
+// amount_ordered_hours (wird beim Verteilen auf Monate weiter unten anteilig nach Tagen aufgeteilt).
 // Bei Perm-Projekten (Pauschalhonorar statt Stundenabrechnung) zählt immer genau 1 Stunde,
 // damit Umsatz = Stunden x Charge/h weiterhin die volle Rechnungssumme ergibt.
 function projectTotalSollHours(p) {
   if (p.projekttyp === 'perm') return p.start_date ? 1 : 0;
   const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
   if (ps === null || pe === null || pe < ps) return 0;
+  if (p.org === 'peax') return round1(p.amount_ordered_hours || 0);
   return round1((p.wochenstunden || 0) * daysInclusive(ps, pe) / 7);
 }
 
 // Anteil der Gesamtstunden, der auf einen bestimmten Monat entfällt (nach Tagesüberlappung).
 // Bei Perm-Projekten fällt die gesamte 1 Stunde in den Monat des Startdatums (= Placement-Monat).
+// Bei peax wird dafür die bestellte Gesamtstundenzahl (amount_ordered_hours) gleichmäßig über die
+// Kalendertage der Projektlaufzeit verteilt (Tage im Monat / Gesamttage x Gesamtstunden) - das
+// Gegenstück zu Std./Woche x Tage/7 bei KH, nur eben ausgehend von der Gesamtzahl statt einer Wochenrate.
 function projectMonthSollHours(p, monthStr) {
   if (p.projekttyp === 'perm') {
     return (p.start_date && p.start_date.slice(0, 7) === monthStr) ? 1 : 0;
   }
   const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
-  if (ps === null || pe === null) return 0;
+  if (ps === null || pe === null || pe < ps) return 0;
   const [ms, me] = monthRangeUTC(monthStr);
   const os = Math.max(ps, ms), oe = Math.min(pe, me);
   if (os > oe) return 0;
-  return round1((p.wochenstunden || 0) * daysInclusive(os, oe) / 7);
+  const overlapDays = daysInclusive(os, oe);
+  if (p.org === 'peax') {
+    if (p.amount_ordered_hours == null) return 0;
+    const totalDays = daysInclusive(ps, pe);
+    if (!totalDays) return 0;
+    return round1(p.amount_ordered_hours * overlapDays / totalDays);
+  }
+  return round1((p.wochenstunden || 0) * overlapDays / 7);
 }
 
 function monthListForProject(p) {
@@ -1288,7 +1301,7 @@ function projekteHTML() {
       </div>
     </div>
     <div class="empty" style="padding-top:0;">${isPeax
-      ? '"Verbleibend" wird automatisch berechnet: Bestellte Stunden minus die Summe der bisher erfassten IST-Stunden dieses Projekts.'
+      ? '"Bestellte Std." wird im Tab SOLL automatisch anteilig nach Kalendertagen auf die Monate der Projektlaufzeit verteilt (wie Std./Woche bei KH, nur ausgehend von der Gesamtstundenzahl). "Verbleibend" wird zusätzlich live berechnet: Bestellte Stunden minus die Summe der bisher erfassten IST-Stunden dieses Projekts.'
       : '"Sollstunden gesamt" wird automatisch berechnet – bei Contract aus Start-/Enddatum und Std./Woche (auf die Monate verteilt), bei Perm ist es immer 1 Std. im Monat des Startdatums, damit Charge/h die volle Pauschale abbildet.'}</div>
     `}
   `;
@@ -1443,9 +1456,9 @@ function renderModal() {
     }
     modalConfig = null;
     await loadAll();
-    // Bei peax gibt es keine monatliche SOLL-Automatik (kein Std./Woche) - dort zählt
-    // stattdessen amount_ordered_hours als einmaliges Gesamt-SOLL.
-    if (proj && proj.org !== 'peax') await syncAutoSoll(proj);
+    // Auch bei peax wird das SOLL automatisch aus der Projektlaufzeit berechnet - nur die
+    // Grundlage ist anders (amount_ordered_hours statt Std./Woche, siehe projectMonthSollHours).
+    if (proj) await syncAutoSoll(proj);
   });
 }
 
