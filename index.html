@@ -144,13 +144,28 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const MONTH_NAMES = ['Januar','Februar','März','April','Mai','Juni','Juli','August','September','Oktober','November','Dezember'];
 const MONTH_NAMES_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
+// Personalisierter Einladungslink für Contractors (?invite=<email> in der URL, siehe
+// "Link kopieren" bei den Contractors im Tab "Timesheets") - öffnet die Registrierung
+// direkt mit vorausgefüllter E-Mail, damit Rike Contractors nicht einzeln anschreiben muss.
+const inviteEmail = new URLSearchParams(location.search).get('invite') || '';
+
 let session = null;
-let authMode = 'login'; // 'login' | 'signup'
+let authMode = inviteEmail ? 'signup' : 'login'; // 'login' | 'signup'
 let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [] };
+// Contractor-Portal (externe Freelancer, die NUR ihr eigenes Timesheet sehen - siehe
+// migration_contractor_timesheets.sql). Komplett getrennt vom internen App-Zustand oben.
+let contractorProfile = null;
+let contractorProjects = [];
+let contractorProjectId = null;
+let contractorMonth = currentMonthStr(); // function-Deklaration ist gehoisted, daher hier schon nutzbar
+let contractorTimesheet = null;
+let contractorDays = [];
+const TS_STATUS_LABEL = { draft: 'Entwurf', submitted: 'Eingereicht', approved: 'Freigegeben', rejected: 'Abgelehnt' };
+let tsFilterStatus = 'submitted';
 // Mehrfirmen-Unterstützung (KH + peax): allowedOrgs kommt aus der Tabelle user_access
 // (welche Firmen darf diese E-Mail-Adresse sehen - siehe migration_multi_org.sql).
 // activeOrg ist die aktuell angezeigte Firma; data.projects/entries/consultants werden
@@ -239,6 +254,19 @@ function round1(n) { return Math.round((n || 0) * 10) / 10; }
 function parseDateUTC(s) { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); }
 function daysInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
 function monthRangeUTC(monthStr) { const [y, m] = monthStr.split('-').map(Number); return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 0)]; }
+
+// Liste aller Kalendertage eines Monats (für das Contractor-Timesheet: ein Eingabefeld pro Tag).
+function daysOfMonth(monthStr) {
+  const [y, m] = monthStr.split('-').map(Number);
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const out = [];
+  for (let d = 1; d <= last; d++) {
+    const date = monthStr + '-' + String(d).padStart(2, '0');
+    const weekday = new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('de-DE', { weekday: 'short', timeZone: 'UTC' });
+    out.push({ date, weekday });
+  }
+  return out;
+}
 
 // Gesamte "bestellte" Stunden über die komplette Projektlaufzeit. Bei KH: Std./Woche x Wochen.
 // Bei peax gibt es kein Std./Woche - dort steht die Gesamtstundenzahl bereits direkt in
@@ -778,6 +806,164 @@ async function deleteConsultant(id) {
   await loadAll();
 }
 
+// ---------- CONTRACTORS (externe Freelancer mit eigenem Timesheet-Zugang) ----------
+// Bewusst eine eigene, kleine Verwaltung getrennt von den Consultants oben - siehe Kommentar
+// am Anfang von migration_contractor_timesheets.sql für den Unterschied.
+
+function contractor(id) { return data.contractors.find(c => c.id === id); }
+function contractorName(id) { const c = contractor(id); return c ? c.name : '–'; }
+
+function openContractorModal(id) {
+  const c = id ? contractor(id) : null;
+  modalConfig = {
+    type: 'contractor', id: id || null,
+    values: c ? { ...c } : { org: activeOrg, name: '', email: '' },
+  };
+  render();
+}
+
+function renderContractorModal(c) {
+  const v = c.values;
+  // Projekte/Kunden der aktuellen Firma, die diesem Contractor zugeordnet werden können -
+  // Mehrfachauswahl (n:m über contractor_projects), da z.B. bei Siemens mehrere Contractors
+  // auf demselben Projekt arbeiten und ein Contractor auch mehrere Projekte haben kann.
+  const assignedIds = c.id ? new Set(data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => cp.project_id)) : new Set();
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>${c.id ? 'Contractor bearbeiten' : 'Neuer Contractor'}</h3>
+      <div class="field"><label>Name</label><input type="text" id="ctf_name" value="${v.name || ''}"></div>
+      <div class="field"><label>E-Mail (für den Timesheet-Login)</label><input type="text" id="ctf_email" value="${v.email || ''}" placeholder="freelancer@beispiel.com"></div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Sobald hier eine E-Mail hinterlegt ist, kann sich die Person auf der normalen Login-Seite mit "Registrieren" selbst einen Zugang anlegen (mit genau dieser E-Mail) und sieht danach nur ihr eigenes Timesheet.</div>
+      <div class="field">
+        <label>Projekte / Kunden (worauf dieser Contractor Stunden buchen darf)</label>
+        <div style="display:flex;flex-direction:column;gap:6px;border:1px solid var(--border);border-radius:8px;padding:10px;max-height:220px;overflow:auto;">
+          ${data.projects.length ? data.projects.map(p => `
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
+              <input type="checkbox" class="ctf_project" value="${p.id}" ${assignedIds.has(p.id) ? 'checked' : ''}> ${p.kunde} <span style="color:var(--muted);">– ${p.contractor}</span>
+            </label>`).join('') : '<span class="empty" style="padding:0;">keine Projekte vorhanden</span>'}
+        </div>
+        <div class="empty" style="text-align:left;padding:6px 0 0;">Mehrfachauswahl möglich – auch wenn ein Projekt schon einem anderen Contractor zugeordnet ist (z.B. bei mehreren Freelancern auf demselben Kunden-Projekt).</div>
+      </div>
+      <div class="modal-actions">
+        ${c.id ? '<button class="btn danger" id="modalDeleteContractor">Löschen</button>' : ''}
+        <button class="btn" id="modalCancelContractor">Abbrechen</button>
+        <button class="btn primary" id="modalSaveContractor">Speichern</button>
+      </div>
+    </div>`;
+  document.getElementById('app').appendChild(overlay);
+
+  document.getElementById('modalCancelContractor').addEventListener('click', () => { modalConfig = null; render(); });
+  if (c.id) document.getElementById('modalDeleteContractor').addEventListener('click', () => deleteContractor(c.id));
+  document.getElementById('modalSaveContractor').addEventListener('click', async () => {
+    const payload = {
+      org: c.id ? c.values.org : activeOrg,
+      name: document.getElementById('ctf_name').value.trim(),
+      email: document.getElementById('ctf_email').value.trim() || null,
+    };
+    let contractorId = c.id;
+    if (contractorId) await sb.from('contractors').update(payload).eq('id', contractorId);
+    else { const { data: inserted } = await sb.from('contractors').insert(payload).select().single(); contractorId = inserted && inserted.id; }
+    if (contractorId) {
+      const checkedIds = Array.from(document.querySelectorAll('.ctf_project:checked')).map(el => el.value);
+      const checkedSet = new Set(checkedIds);
+      const toRemove = Array.from(assignedIds).filter(id => !checkedSet.has(id));
+      const toAdd = checkedIds.filter(id => !assignedIds.has(id));
+      for (const projectId of toRemove) await sb.from('contractor_projects').delete().eq('contractor_id', contractorId).eq('project_id', projectId);
+      for (const projectId of toAdd) await sb.from('contractor_projects').insert({ contractor_id: contractorId, project_id: projectId });
+    }
+    modalConfig = null;
+    await loadAll();
+  });
+}
+
+async function deleteContractor(id) {
+  if (!confirm('Contractor löschen? Verknüpfte Projekte verlieren dabei den Timesheet-Zugang (die Projekte selbst bleiben erhalten).')) return;
+  await sb.from('contractors').delete().eq('id', id);
+  modalConfig = null;
+  await loadAll();
+}
+
+async function approveTimesheetAdmin(id) {
+  const { error } = await sb.rpc('approve_timesheet', { p_timesheet_id: id });
+  if (error) { alert(error.message); return; }
+  await loadAll();
+}
+
+async function rejectTimesheetAdmin(id) {
+  const note = prompt('Grund der Ablehnung (wird dem Contractor angezeigt):');
+  if (note === null) return; // abgebrochen
+  const { error } = await sb.rpc('reject_timesheet', { p_timesheet_id: id, p_note: note });
+  if (error) { alert(error.message); return; }
+  await loadAll();
+}
+
+function timesheetsHTML() {
+  const totalOf = tsId => data.timesheetDays.filter(d => d.timesheet_id === tsId).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+  const list = data.timesheets
+    .filter(t => tsFilterStatus === 'all' || t.status === tsFilterStatus)
+    .sort((a, b) => b.month.localeCompare(a.month));
+
+  return `
+    <div class="card panel">
+      <h2>Contractors</h2>
+      <div class="toolbar" style="margin-bottom:10px;">
+        <button class="btn primary" id="addContractorBtn">+ Neuer Contractor</button>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Name</th><th>E-Mail (Login)</th><th>Verknüpfte Projekte</th><th>Aktionen</th></tr></thead>
+          <tbody>
+            ${data.contractors.map(c => `<tr>
+              <td>${c.name}</td>
+              <td>${c.email || '<span class="empty" style="padding:0;">kein Login hinterlegt</span>'}</td>
+              <td>${data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => { const p = project(cp.project_id); return p ? p.kunde : null; }).filter(Boolean).join(', ') || '–'}</td>
+              <td>
+                ${c.email ? `<button class="link" data-copy-invite="${c.id}">Link kopieren</button> ` : ''}
+                <button class="link" data-edit-contractor="${c.id}">Bearbeiten</button> <button class="link danger" data-del-contractor="${c.id}">Löschen</button>
+              </td>
+            </tr>`).join('')}
+            ${!data.contractors.length ? '<tr><td colspan="4" class="empty">Noch keine Contractors angelegt.</td></tr>' : ''}
+          </tbody>
+        </table>
+      </div>
+      <div class="empty" style="text-align:left;padding-top:10px;">"Link kopieren" erzeugt einen persönlichen Einladungslink mit vorausgefüllter E-Mail – einfach per WhatsApp/E-Mail/Slack an den Contractor schicken, der muss dort nur noch ein Passwort wählen. Kein separates Verschicken einer Mail über die App nötig.</div>
+    </div>
+    <div class="card panel">
+      <h2>Timesheets</h2>
+      <div class="toolbar-filters" style="margin-bottom:14px;">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
+        <select id="tsFilterStatusSel">
+          <option value="submitted" ${tsFilterStatus === 'submitted' ? 'selected' : ''}>Eingereicht (offen)</option>
+          <option value="all" ${tsFilterStatus === 'all' ? 'selected' : ''}>Alle</option>
+          <option value="draft" ${tsFilterStatus === 'draft' ? 'selected' : ''}>Entwurf</option>
+          <option value="approved" ${tsFilterStatus === 'approved' ? 'selected' : ''}>Freigegeben</option>
+          <option value="rejected" ${tsFilterStatus === 'rejected' ? 'selected' : ''}>Abgelehnt</option>
+        </select>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Contractor</th><th>Kunde</th><th>Monat</th><th>Stunden</th><th>Status</th><th>Aktionen</th></tr></thead>
+          <tbody>
+            ${list.map(t => {
+              const p = project(t.project_id);
+              return `<tr>
+                <td>${contractorName(t.contractor_id)}</td><td>${p ? p.kunde : '–'}</td><td>${monthLabel(t.month)}</td>
+                <td>${fmtNum(totalOf(t.id), 1)}</td>
+                <td><span class="mini-badge ${t.status === 'approved' ? 'auto' : (t.status === 'rejected' ? '' : 'manuell')}">${TS_STATUS_LABEL[t.status]}</span>${t.status === 'rejected' && t.review_note ? ` <span style="color:var(--muted);font-size:11px;">(${t.review_note})</span>` : ''}</td>
+                <td>${t.status === 'submitted' ? `<button class="link" data-approve-ts="${t.id}">Freigeben</button> <button class="link danger" data-reject-ts="${t.id}">Ablehnen</button>` : '–'}</td>
+              </tr>`;
+            }).join('')}
+            ${!list.length ? '<tr><td colspan="6" class="empty">Keine Timesheets für diesen Filter.</td></tr>' : ''}
+          </tbody>
+        </table>
+      </div>
+      <div class="empty" style="text-align:left;padding-top:10px;">Freigegebene Stunden zählen automatisch als IST-Stunden des jeweiligen Projekts/Monats (Tab "IST") und fließen in Umsatz, Rohertrag und Provisionen ein.</div>
+    </div>
+  `;
+}
+
 // ---------- DATA LOADING ----------
 
 async function loadAll() {
@@ -785,7 +971,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
@@ -795,6 +981,13 @@ async function loadAll() {
     // team_memberships ist ebenfalls optional (siehe migration_team_bonus.sql) - ohne die Migration
     // bleiben Team-Boni einfach leer, statt die App zum Absturz zu bringen.
     sb.from('team_memberships').select('*'),
+    // contractors/contractor_projects/timesheets/timesheet_days sind ebenfalls optional (siehe
+    // migration_contractor_timesheets.sql) - ohne die Migration bleibt der Tab "Timesheets"
+    // einfach leer, statt die App zum Absturz zu bringen.
+    sb.from('contractors').select('*').order('name'),
+    sb.from('contractor_projects').select('*'),
+    sb.from('timesheets').select('*').order('month', { ascending: false }),
+    sb.from('timesheet_days').select('*'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -803,10 +996,16 @@ async function loadAll() {
   }
   if (e4) console.warn('ki_vorschlaege konnte nicht geladen werden (Migration ausgeführt?)', e4);
   if (e5) console.warn('team_memberships konnte nicht geladen werden (migration_team_bonus.sql ausgeführt?)', e5);
+  if (e6 || e7 || e8 || e9) console.warn('Contractor-Timesheets konnten nicht geladen werden (migration_contractor_timesheets.sql ausgeführt?)', e6, e7, e8, e9);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
   data.entries = (entries || []).filter(e => projectIds.has(e.project_id));
+  data.contractors = (contractors || []).filter(c => c.org === activeOrg);
+  data.contractorProjects = (contractorProjects || []).filter(cp => projectIds.has(cp.project_id));
+  data.timesheets = (timesheets || []).filter(t => projectIds.has(t.project_id));
+  const timesheetIds = new Set(data.timesheets.map(t => t.id));
+  data.timesheetDays = (timesheetDays || []).filter(d => timesheetIds.has(d.timesheet_id));
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   data.ki_vorschlaege = kiVorschlaege || [];
   data.team_memberships = teamMemberships || [];
@@ -852,6 +1051,10 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'consultants' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'ki_vorschlaege' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'contractors' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'contractor_projects' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheets' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheet_days' }, () => loadAll())
     .subscribe();
 }
 
@@ -913,7 +1116,8 @@ function renderAuth() {
         </div>
         ${authError ? `<div class="banner error">${authError}</div>` : ''}
         ${authInfo ? `<div class="banner info">${authInfo}</div>` : ''}
-        <div class="field"><label>E-Mail</label><input type="email" id="authEmail"></div>
+        ${inviteEmail && authMode === 'signup' ? `<div class="banner info">Persönlicher Einladungslink für <strong>${inviteEmail}</strong> – einfach ein Passwort wählen und Konto erstellen.</div>` : ''}
+        <div class="field"><label>E-Mail</label><input type="email" id="authEmail" value="${inviteEmail && authMode === 'signup' ? inviteEmail : ''}"></div>
         <div class="field"><label>Passwort</label><input type="password" id="authPassword"></div>
         <button class="btn primary" id="authSubmit" style="width:100%;" ${authBusy ? 'disabled' : ''}>
           ${authBusy ? '…' : (authMode === 'login' ? 'Anmelden' : 'Konto erstellen')}
@@ -974,6 +1178,7 @@ function render() {
       <button data-tab="ist" class="${activeTab === 'ist' ? 'active' : ''}">IST</button>
       <button data-tab="provisionen" class="${activeTab === 'provisionen' ? 'active' : ''}">Provisionen</button>
       <button data-tab="ki" class="${activeTab === 'ki' ? 'active' : ''}">KI-Vorschläge${data.ki_vorschlaege.filter(v => v.status === 'pending').length ? ` (${data.ki_vorschlaege.filter(v => v.status === 'pending').length})` : ''}</button>
+      <button data-tab="timesheets" class="${activeTab === 'timesheets' ? 'active' : ''}">Timesheets${data.timesheets.filter(t => t.status === 'submitted').length ? ` (${data.timesheets.filter(t => t.status === 'submitted').length})` : ''}</button>
     </nav>
     <div id="tab-content"></div>
     <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
@@ -989,11 +1194,13 @@ function render() {
   else if (activeTab === 'ist') content.innerHTML = monthEntryHTML('ist');
   else if (activeTab === 'provisionen') content.innerHTML = reportConfig ? consultantReportHTML() : provisionenHTML();
   else if (activeTab === 'ki') content.innerHTML = kiVorschlaegeHTML();
+  else if (activeTab === 'timesheets') content.innerHTML = timesheetsHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
   if (modalConfig && modalConfig.type === 'project') renderModal();
   if (modalConfig && modalConfig.type === 'consultant') renderConsultantModal(modalConfig);
+  if (modalConfig && modalConfig.type === 'contractor') renderContractorModal(modalConfig);
 }
 
 // ---------- DASHBOARD ----------
@@ -1388,6 +1595,16 @@ function renderModal() {
         <div class="field"><label>Consultant 1</label><select id="f_consultant1">${consultantOptionsHTML(v.consultant1_id)}</select></div>
         <div class="field"><label>Consultant 2 (optional)</label><select id="f_consultant2">${consultantOptionsHTML(v.consultant2_id)}</select></div>
       </div>
+      <div class="field">
+        <label>Contractor-Zugang (Timesheet) – Mehrfachauswahl möglich</label>
+        <div style="display:flex;flex-direction:column;gap:6px;border:1px solid var(--border);border-radius:8px;padding:10px;max-height:160px;overflow:auto;">
+          ${data.contractors.length ? data.contractors.map(ct => `
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
+              <input type="checkbox" class="f_contractor_project" value="${ct.id}" ${c.id && data.contractorProjects.some(cp => cp.contractor_id === ct.id && cp.project_id === c.id) ? 'checked' : ''}> ${ct.name}${ct.email ? '' : ' (kein Login hinterlegt)'}
+            </label>`).join('') : '<span class="empty" style="padding:0;">noch keine Contractors angelegt (Tab "Timesheets")</span>'}
+        </div>
+      </div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Nur angehakte Contractors können für dieses Projekt eigene Stunden per Timesheet einreichen (z.B. bei mehreren Freelancern auf demselben Kunden-Projekt mehrere anhaken). Neue Contractors im Tab "Timesheets" anlegen.</div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDelete">Löschen</button>' : ''}
         <button class="btn" id="modalCancel">Abbrechen</button>
@@ -1453,6 +1670,16 @@ function renderModal() {
     } else {
       const { data: inserted } = await sb.from('projects').insert(payload).select().single();
       proj = inserted;
+    }
+    if (proj) {
+      // Contractor-Zugang (n:m, siehe contractor_projects) - Mehrfachauswahl, da z.B. bei
+      // Siemens mehrere Contractors am selben Projekt arbeiten.
+      const checkedIds = Array.from(document.querySelectorAll('.f_contractor_project:checked')).map(el => el.value);
+      const existingIds = new Set(c.id ? data.contractorProjects.filter(cp => cp.project_id === c.id).map(cp => cp.contractor_id) : []);
+      const toRemove = Array.from(existingIds).filter(id => !checkedIds.includes(id));
+      const toAdd = checkedIds.filter(id => !existingIds.has(id));
+      for (const contractorId of toRemove) await sb.from('contractor_projects').delete().eq('project_id', proj.id).eq('contractor_id', contractorId);
+      for (const contractorId of toAdd) await sb.from('contractor_projects').insert({ project_id: proj.id, contractor_id: contractorId });
     }
     modalConfig = null;
     await loadAll();
@@ -1828,6 +2055,146 @@ function wireTabEvents() {
       setEntry(kind, pid, monthVal, val);
     });
   });
+  const addContractorBtn = document.getElementById('addContractorBtn');
+  if (addContractorBtn) addContractorBtn.addEventListener('click', () => openContractorModal(null));
+  document.querySelectorAll('[data-edit-contractor]').forEach(b => b.addEventListener('click', () => openContractorModal(b.dataset.editContractor)));
+  document.querySelectorAll('[data-del-contractor]').forEach(b => b.addEventListener('click', () => deleteContractor(b.dataset.delContractor)));
+  document.querySelectorAll('[data-copy-invite]').forEach(b => b.addEventListener('click', async () => {
+    const c = contractor(b.dataset.copyInvite);
+    if (!c || !c.email) return;
+    const link = location.origin + location.pathname + '?invite=' + encodeURIComponent(c.email);
+    try {
+      await navigator.clipboard.writeText(link);
+      const old = b.textContent; b.textContent = 'Kopiert!'; setTimeout(() => { b.textContent = old; }, 1500);
+    } catch (e) {
+      prompt('Link kopieren (Strg/Cmd+C):', link);
+    }
+  }));
+  const tsFilterStatusSel = document.getElementById('tsFilterStatusSel');
+  if (tsFilterStatusSel) tsFilterStatusSel.addEventListener('change', () => { tsFilterStatus = tsFilterStatusSel.value; render(); });
+  document.querySelectorAll('[data-approve-ts]').forEach(b => b.addEventListener('click', () => approveTimesheetAdmin(b.dataset.approveTs)));
+  document.querySelectorAll('[data-reject-ts]').forEach(b => b.addEventListener('click', () => rejectTimesheetAdmin(b.dataset.rejectTs)));
+}
+
+// ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
+// Läuft komplett getrennt von der internen App oben - ausschließlich über die dort angelegten
+// SECURITY DEFINER-Funktionen (sb.rpc(...)), nie über direkten Tabellenzugriff, damit ein
+// Contractor rein technisch gar nicht an andere Daten kommen kann.
+
+// Prüft, ob die eingeloggte E-Mail zu einem Contractor gehört (kein interner Zugriff nötig).
+async function initContractorAccess() {
+  const { data: rows, error } = await sb.rpc('my_contractor_profile');
+  if (error) { console.error('Contractor-Profil konnte nicht geladen werden (migration_contractor_timesheets.sql ausgeführt?)', error); return false; }
+  if (!rows || !rows.length) return false;
+  contractorProfile = rows[0];
+  return true;
+}
+
+async function loadContractorPortal() {
+  const { data: projects, error } = await sb.rpc('my_timesheet_projects');
+  if (error) console.error('Projekte des Contractors konnten nicht geladen werden', error);
+  contractorProjects = projects || [];
+  if (!contractorProjects.find(p => p.project_id === contractorProjectId)) {
+    contractorProjectId = contractorProjects.length ? contractorProjects[0].project_id : null;
+  }
+  await loadContractorTimesheet();
+}
+
+async function loadContractorTimesheet() {
+  if (!contractorProjectId) { contractorTimesheet = null; contractorDays = []; renderContractorPortal(); return; }
+  const { data: tsRows, error } = await sb.rpc('my_timesheet', { p_project_id: contractorProjectId, p_month: contractorMonth });
+  if (error) { console.error('Timesheet konnte nicht geladen werden', error); contractorTimesheet = null; contractorDays = []; renderContractorPortal(); return; }
+  contractorTimesheet = (tsRows && tsRows[0]) || null;
+  if (!contractorTimesheet) { contractorDays = []; renderContractorPortal(); return; }
+  const { data: dayRows, error: dayErr } = await sb.rpc('my_timesheet_days', { p_timesheet_id: contractorTimesheet.timesheet_id });
+  if (dayErr) console.error('Tageswerte konnten nicht geladen werden', dayErr);
+  contractorDays = dayRows || [];
+  renderContractorPortal();
+}
+
+function renderContractorPortal() {
+  document.body.dataset.org = contractorProfile ? contractorProfile.org : '';
+  const app = document.getElementById('app');
+  const status = contractorTimesheet ? contractorTimesheet.status : 'draft';
+  const locked = status === 'submitted' || status === 'approved';
+  const days = daysOfMonth(contractorMonth);
+  const dayMap = new Map(contractorDays.map(d => [d.day, d.stunden]));
+  const total = contractorDays.reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+
+  app.innerHTML = `
+    <header class="top">
+      <div class="brand-row">
+        ${contractorProfile && contractorProfile.org === 'peax'
+          ? `<div class="peax-wordmark">peax<span class="tag">A Konzepthaus Brand</span></div>`
+          : `<div class="kh-wordmark">KONZEPT<br>HAUS</div>`}
+        <div>
+          <h1>Mein Timesheet</h1>
+          <div class="sub">${contractorProfile ? contractorProfile.name : ''} – ${session.user.email}</div>
+        </div>
+      </div>
+      <div class="userbar"><button class="btn" id="logoutBtn">Abmelden</button></div>
+    </header>
+    <div class="card panel" style="max-width:640px;">
+      ${!contractorProjects.length ? '<div class="empty">Für dich ist noch kein Projekt hinterlegt. Bitte bei Rike melden.</div>' : `
+      <div class="toolbar-filters" style="margin-bottom:16px;">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Projekt / Kunde:</label>
+        <select id="tsProjectSel">
+          ${contractorProjects.map(p => `<option value="${p.project_id}" ${p.project_id === contractorProjectId ? 'selected' : ''}>${p.kunde}</option>`).join('')}
+        </select>
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
+        <input type="month" id="tsMonthInput" value="${contractorMonth}">
+      </div>
+      <div style="margin-bottom:14px;">
+        <span class="mini-badge ${status === 'approved' ? 'auto' : (status === 'rejected' ? '' : 'manuell')}" style="font-size:11px;">${TS_STATUS_LABEL[status]}</span>
+        ${status === 'rejected' && contractorTimesheet.review_note ? `<div class="banner error" style="margin-top:10px;">Grund der Ablehnung: ${contractorTimesheet.review_note}</div>` : ''}
+        ${locked ? `<div class="empty" style="text-align:left;padding:6px 0;">${status === 'approved' ? 'Freigegeben – keine Änderung mehr möglich.' : 'Eingereicht – wird geprüft, solange keine Änderung möglich.'}</div>` : ''}
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Tag</th><th>Wochentag</th><th>Stunden</th></tr></thead>
+          <tbody>
+            ${days.map(d => `<tr>
+              <td>${fmtDate(d.date)}</td><td>${d.weekday}</td>
+              <td><input class="num-cell" type="number" min="0" step="0.5" data-day="${d.date}" value="${dayMap.has(d.date) ? dayMap.get(d.date) : ''}" ${locked ? 'disabled' : ''}></td>
+            </tr>`).join('')}
+          </tbody>
+          <tfoot><tr style="font-weight:700;"><td colspan="2">Summe</td><td>${fmtNum(total, 1)}</td></tr></tfoot>
+        </table>
+      </div>
+      <div class="modal-actions" style="justify-content:flex-start;margin-top:16px;">
+        <button class="btn primary" id="tsSubmitBtn" ${locked || !total ? 'disabled' : ''}>Timesheet einreichen</button>
+      </div>
+      `}
+    </div>
+    <footer class="hint">Deine Eingaben werden automatisch gespeichert. Nach dem Einreichen prüft das Team deine Stunden und gibt sie frei.</footer>
+  `;
+  document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+  const projectSel = document.getElementById('tsProjectSel');
+  if (projectSel) projectSel.addEventListener('change', () => { contractorProjectId = projectSel.value; loadContractorTimesheet(); });
+  const monthInput = document.getElementById('tsMonthInput');
+  if (monthInput) monthInput.addEventListener('change', () => { contractorMonth = monthInput.value; loadContractorTimesheet(); });
+  app.querySelectorAll('input[data-day]').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const val = inp.value === '' ? 0 : Number(inp.value);
+      const { error } = await sb.rpc('set_timesheet_day', { p_timesheet_id: contractorTimesheet.timesheet_id, p_day: inp.dataset.day, p_stunden: val });
+      if (error) { alert(error.message); }
+      await loadContractorTimesheet();
+    });
+  });
+  const submitBtn = document.getElementById('tsSubmitBtn');
+  if (submitBtn) submitBtn.addEventListener('click', async () => {
+    const { error } = await sb.rpc('submit_timesheet', { p_timesheet_id: contractorTimesheet.timesheet_id });
+    if (error) { alert(error.message); return; }
+    await loadContractorTimesheet();
+  });
+}
+
+function subscribeContractorRealtime() {
+  if (realtimeChannel) return;
+  realtimeChannel = sb.channel('public:contractor-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheets' }, () => loadContractorTimesheet())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheet_days' }, () => loadContractorTimesheet())
+    .subscribe();
 }
 
 // ---------- BOOTSTRAP ----------
@@ -1835,7 +2202,12 @@ function wireTabEvents() {
 async function startApp() {
   document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>';
   await initOrgAccess();
-  if (!allowedOrgs.length) { renderNoAccess(); return; }
+  if (!allowedOrgs.length) {
+    const isContractor = await initContractorAccess();
+    if (isContractor) { subscribeContractorRealtime(); await loadContractorPortal(); return; }
+    renderNoAccess();
+    return;
+  }
   subscribeRealtime();
   await loadAll();
 }
@@ -1848,6 +2220,7 @@ sb.auth.onAuthStateChange((event, newSession) => {
   } else {
     if (realtimeChannel) { sb.removeChannel(realtimeChannel); realtimeChannel = null; }
     allowedOrgs = []; activeOrg = null;
+    contractorProfile = null; contractorProjects = []; contractorProjectId = null; contractorTimesheet = null; contractorDays = [];
     renderAuth();
   }
 });
