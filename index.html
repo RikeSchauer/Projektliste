@@ -139,7 +139,16 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], entries: [], consultants: [], ki_vorschlaege: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [] };
+// Mehrfirmen-Unterstützung (KH + peax): allowedOrgs kommt aus der Tabelle user_access
+// (welche Firmen darf diese E-Mail-Adresse sehen - siehe migration_multi_org.sql).
+// activeOrg ist die aktuell angezeigte Firma; data.projects/entries/consultants werden
+// in loadAll() darauf gefiltert. data.allProjects bleibt firmenübergreifend (alles, worauf
+// die Person laut RLS Zugriff hat) - wird nur für die KI-Vorschläge-Projektauswahl gebraucht,
+// weil ein Vorschlag dort wahlweise einem KH- oder peax-Projekt zugeordnet werden kann.
+let allowedOrgs = [];
+let activeOrg = null;
+const ORG_LABELS = { kh: 'KH', peax: 'peax' };
 let activeTab = 'dashboard';
 let dashMonth = 'all';
 let sollMonth = currentMonthStr();
@@ -177,7 +186,12 @@ function fmtNum(n, digits) { return (n || 0).toLocaleString('de-DE', { maximumFr
 function fmtPct(n) { return ((n || 0) * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + '%'; }
 function fmtDate(s) { if (!s) return '–'; const [y,m,d] = s.split('-'); return `${d}.${m}.${y}`; }
 
-function project(id) { return data.projects.find(p => p.id === id); }
+// Sucht bewusst über data.allProjects (nicht nur die aktuelle Firma), damit ein
+// KI-Vorschlag, der einem Projekt der anderen Firma zugeordnet wurde, trotzdem
+// korrekt angezeigt wird. Für alle anderen Stellen (Dashboard/Projekte/SOLL/IST/
+// Provisionen, die ohnehin nur mit data.projects der aktuellen Firma arbeiten)
+// liefert das dieselben Ergebnisse, weil IDs eindeutig sind.
+function project(id) { return data.allProjects.find(p => p.id === id); }
 function margeH(p) { return (p.charge_h || 0) - (p.pay_h || 0); }
 function margePct(p) { return p.charge_h ? margeH(p) / p.charge_h : 0; }
 
@@ -604,7 +618,9 @@ function openConsultantModal(id) {
   const c = id ? consultant(id) : null;
   modalConfig = {
     type: 'consultant', id: id || null,
-    values: c ? { ...c } : { name: '', rate: 0.15, is_team_lead: false, team_rate: 0.05, team_lead_id: '' },
+    // Neue Consultants gehören automatisch zur aktuell angezeigten Firma (activeOrg) - siehe
+    // Kommentar bei openProjectModal für die gleiche Logik bei Projekten.
+    values: c ? { ...c } : { org: activeOrg, name: '', rate: 0.15, is_team_lead: false, team_rate: 0.05, team_lead_id: '' },
   };
   render();
 }
@@ -647,6 +663,7 @@ function renderConsultantModal(c) {
   if (c.id) document.getElementById('modalDeleteConsultant').addEventListener('click', () => deleteConsultant(c.id));
   document.getElementById('modalSaveConsultant').addEventListener('click', async () => {
     const payload = {
+      org: c.id ? c.values.org : activeOrg, // Firma steht fest, sobald der Consultant existiert
       name: document.getElementById('cf_name').value.trim(),
       rate: Number(document.getElementById('cf_rate').value) || 0,
       is_team_lead: document.getElementById('cf_is_team_lead').value === 'true',
@@ -670,7 +687,11 @@ async function deleteConsultant(id) {
 // ---------- DATA LOADING ----------
 
 async function loadAll() {
-  const [{ data: projects, error: e1 }, { data: entries, error: e2 }, { data: consultants, error: e3 }, { data: kiVorschlaege, error: e4 }] = await Promise.all([
+  // allProjects/allConsultants kommen ungefiltert (RLS liefert automatisch nur die Firmen,
+  // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
+  // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
+  // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
@@ -684,11 +705,45 @@ async function loadAll() {
     return;
   }
   if (e4) console.warn('ki_vorschlaege konnte nicht geladen werden (Migration ausgeführt?)', e4);
-  data.projects = projects || [];
-  data.entries = entries || [];
-  data.consultants = consultants || [];
+  data.allProjects = allProjects || [];
+  data.projects = data.allProjects.filter(p => p.org === activeOrg);
+  const projectIds = new Set(data.projects.map(p => p.id));
+  data.entries = (entries || []).filter(e => projectIds.has(e.project_id));
+  data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   data.ki_vorschlaege = kiVorschlaege || [];
   render();
+}
+
+// Ermittelt, auf welche Firma(en) diese E-Mail-Adresse laut Tabelle user_access Zugriff hat
+// (RLS liefert dort ohnehin nur die eigenen Zeilen zurück, siehe migration_multi_org.sql).
+// Merkt sich die zuletzt gewählte Firma im Browser (localStorage), damit man nach einem
+// Reload nicht immer wieder auf die erste Firma zurückfällt.
+async function initOrgAccess() {
+  const { data: rows, error } = await sb.from('user_access').select('org');
+  if (error) { console.error('user_access konnte nicht geladen werden', error); allowedOrgs = []; activeOrg = null; return; }
+  allowedOrgs = Array.from(new Set((rows || []).map(r => r.org)));
+  const saved = localStorage.getItem('activeOrg');
+  activeOrg = allowedOrgs.includes(saved) ? saved : (allowedOrgs[0] || null);
+}
+
+function setActiveOrg(org) {
+  if (!allowedOrgs.includes(org) || org === activeOrg) return;
+  activeOrg = org;
+  localStorage.setItem('activeOrg', org);
+  loadAll();
+}
+
+function renderNoAccess() {
+  document.getElementById('app').innerHTML = `
+    <div class="auth-wrap">
+      <h1>Projektliste</h1>
+      <div class="banner error">
+        Für <strong>${session.user.email}</strong> ist noch kein Zugriff auf KH oder peax hinterlegt.
+        Bitte bei Rike melden, damit ein Eintrag in der Tabelle "user_access" ergänzt wird.
+      </div>
+      <button class="btn" id="noAccessLogout" style="width:100%;">Abmelden</button>
+    </div>`;
+  document.getElementById('noAccessLogout').addEventListener('click', handleLogout);
 }
 
 function subscribeRealtime() {
@@ -709,20 +764,24 @@ async function handleLogin(email, password) {
   authBusy = false;
   if (error) { authError = error.message; renderAuth(); }
 }
-// Nur @konzepthaus-consulting.com darf sich registrieren. Das ist nur die Frontend-Vorabprüfung
-// für eine sofortige, freundliche Fehlermeldung – die eigentliche Absicherung läuft serverseitig
-// über einen Datenbank-Trigger auf auth.users (siehe Einrichtungsanleitung/Migration), da der
-// anon key öffentlich ist und Registrierungen theoretisch auch direkt über die Supabase-API
-// versucht werden könnten.
-const ALLOWED_EMAIL_DOMAIN = 'konzepthaus-consulting.com';
+// Nur @konzepthaus-consulting.com (KH) oder @peaxagency.com (peax) dürfen sich registrieren.
+// Das ist nur die Frontend-Vorabprüfung für eine sofortige, freundliche Fehlermeldung – die
+// eigentliche Absicherung läuft serverseitig über einen Datenbank-Trigger auf auth.users
+// (siehe migration_email_domains.sql), da der anon key öffentlich ist und Registrierungen
+// theoretisch auch direkt über die Supabase-API versucht werden könnten. Derselbe Trigger
+// trägt bei der Registrierung automatisch den passenden Firmen-Zugriff in user_access ein
+// (peaxagency.com -> peax, konzepthaus-consulting.com -> kh) - nur Zugriff auf BEIDE Firmen
+// (wie bei Rike) muss weiterhin von Hand per SQL Editor ergänzt werden.
+const ALLOWED_EMAIL_DOMAINS = ['konzepthaus-consulting.com', 'peaxagency.com'];
 function isAllowedEmail(email) {
-  return (email || '').toLowerCase().trim().endsWith('@' + ALLOWED_EMAIL_DOMAIN);
+  const e = (email || '').toLowerCase().trim();
+  return ALLOWED_EMAIL_DOMAINS.some(d => e.endsWith('@' + d));
 }
 
 async function handleSignup(email, password) {
   authError = ''; authInfo = '';
   if (!isAllowedEmail(email)) {
-    authError = `Registrierung ist nur mit einer @${ALLOWED_EMAIL_DOMAIN} E-Mail-Adresse möglich.`;
+    authError = `Registrierung ist nur mit einer @${ALLOWED_EMAIL_DOMAINS.join(' oder @')} E-Mail-Adresse möglich.`;
     renderAuth();
     return;
   }
@@ -790,10 +849,14 @@ function render() {
   app.innerHTML = `
     <header class="top">
       <div>
-        <h1>Projektliste – Freelancer Dashboard</h1>
+        <h1>Projektliste – ${ORG_LABELS[activeOrg] || activeOrg} Freelancer Dashboard</h1>
         <div class="sub">Projekte, SOLL/IST-Erfassung &amp; Kennzahlen – live geteilt im Team</div>
       </div>
       <div class="userbar">
+        ${allowedOrgs.length > 1 ? `
+          <div class="toolbar" style="margin:0;">
+            ${allowedOrgs.map(o => `<button class="btn ${o === activeOrg ? 'primary' : ''}" data-org-switch="${o}">${ORG_LABELS[o] || o}</button>`).join('')}
+          </div>` : ''}
         <span>${session.user.email}</span>
         <button class="btn" id="logoutBtn">Abmelden</button>
       </div>
@@ -810,6 +873,7 @@ function render() {
     <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
   `;
   document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+  app.querySelectorAll('[data-org-switch]').forEach(b => b.addEventListener('click', () => setActiveOrg(b.dataset.orgSwitch)));
   app.querySelectorAll('nav.tabs button').forEach(b => b.addEventListener('click', () => { activeTab = b.dataset.tab; reportConfig = null; render(); }));
 
   const content = document.getElementById('tab-content');
@@ -1122,7 +1186,10 @@ function openProjectModal(id) {
   const p = id ? project(id) : null;
   modalConfig = {
     type: 'project', id: id || null,
-    values: p ? { ...p } : { projekttyp: 'contract', kunde: '', contractor: '', rechnungsname: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
+    // Neue Projekte gehören automatisch zur aktuell angezeigten Firma (activeOrg) - kein
+    // eigenes Auswahlfeld dafür, damit hier nichts versehentlich der falschen Firma
+    // zugeordnet werden kann. Bestehende Projekte behalten beim Bearbeiten ihre Firma.
+    values: p ? { ...p } : { org: activeOrg, projekttyp: 'contract', kunde: '', contractor: '', rechnungsname: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
   };
   render();
 }
@@ -1219,6 +1286,7 @@ function renderModal() {
     let endDate = document.getElementById('f_ende').value || null;
     if (isPerm && !endDate) endDate = startDate;
     const payload = {
+      org: c.id ? c.values.org : activeOrg, // Firma steht fest, sobald das Projekt existiert
       projekttyp: isPerm ? 'perm' : 'contract',
       kunde: document.getElementById('f_kunde').value.trim(),
       contractor: document.getElementById('f_contractor').value.trim(),
@@ -1467,11 +1535,11 @@ function kiVorschlaegeHTML() {
               <td>${v.rechnungsnummer || '–'}${invoiceUrl ? ` <a href="${invoiceUrl}" target="_blank" rel="noopener" title="Original-Rechnung in Weclapp öffnen" style="text-decoration:none;">📄</a>` : ''}</td>
               <td>${v.contractor_raw || '–'}</td>
               <td>${isPending
-                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.projects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>${p.contractor} – ${p.kunde}</option>`).join('')}</select>`
-                : (matched ? `${matched.kunde} – ${matched.contractor}` : '<span class="empty" style="padding:0;">kein Projekt</span>')}</td>
+                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.allProjects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>[${ORG_LABELS[p.org] || p.org}] ${p.contractor} – ${p.kunde}</option>`).join('')}</select>`
+                : (matched ? `[${ORG_LABELS[matched.org] || matched.org}] ${matched.kunde} – ${matched.contractor}` : '<span class="empty" style="padding:0;">kein Projekt</span>')}</td>
               <td>${isPending ? `<input type="month" data-vid="${v.id}" data-field="month" value="${v.month || ''}">` : (v.month ? monthLabel(v.month) : '–')}</td>
               <td>${isPending ? `<input class="num-cell" type="number" step="0.5" min="0" data-vid="${v.id}" data-field="stunden" value="${v.stunden ?? ''}">` : fmtNum(v.stunden, 1)}</td>
-              <td>${v.methode ? `<span class="mini-badge ${v.methode === 'extrahiert' ? 'auto' : 'manuell'}">${v.methode}</span>` : '–'}</td>
+              <td>${v.methode ? `<span class="mini-badge ${['extrahiert', 'rechnungstext'].includes(v.methode) ? 'auto' : 'manuell'}">${v.methode}</span>` : '–'}</td>
               <td>${v.betrag != null ? fmtEUR(v.betrag) : '–'}</td>
               <td style="white-space:normal;max-width:220px;">${v.notiz ? `<span class="empty" style="padding:0;text-align:left;display:block;">${v.notiz}</span>` : ''}</td>
               <td><span class="badge ${v.status === 'approved' ? 'Aktiv' : v.status === 'rejected' ? 'Kritisch' : 'Achtung'}">${v.status === 'approved' ? 'Übernommen' : v.status === 'rejected' ? 'Abgelehnt' : 'Offen'}</span></td>
@@ -1616,22 +1684,29 @@ function wireTabEvents() {
 
 // ---------- BOOTSTRAP ----------
 
+async function startApp() {
+  document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>';
+  await initOrgAccess();
+  if (!allowedOrgs.length) { renderNoAccess(); return; }
+  subscribeRealtime();
+  await loadAll();
+}
+
 sb.auth.onAuthStateChange((event, newSession) => {
   session = newSession;
   if (session) {
     renderAuth(); // clears any stale auth screen instantly, then app takes over
-    document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>';
-    subscribeRealtime();
-    loadAll();
+    startApp();
   } else {
     if (realtimeChannel) { sb.removeChannel(realtimeChannel); realtimeChannel = null; }
+    allowedOrgs = []; activeOrg = null;
     renderAuth();
   }
 });
 
 sb.auth.getSession().then(({ data: { session: s } }) => {
   session = s;
-  if (session) { document.getElementById('app').innerHTML = '<div class="empty">Lade…</div>'; subscribeRealtime(); loadAll(); }
+  if (session) startApp();
   else renderAuth();
 });
 </script>
