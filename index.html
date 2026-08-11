@@ -1106,9 +1106,22 @@ function filteredSortedProjects() {
   return list;
 }
 
+// peax arbeitet beim SOLL anders als KH: statt automatisch aus Std./Woche x Laufzeit
+// berechnet zu werden, wird die insgesamt bestellte Stundenzahl einmalig manuell im
+// Projekt eingetragen (amount_ordered_hours). "Verbleibend" wird deshalb hier live
+// berechnet (bestellt minus Summe aller bisher erfassten IST-Stunden dieses Projekts),
+// statt gespeichert zu werden - so bleibt es automatisch aktuell, auch wenn neue
+// IST-Stunden über die KI-Vorschläge aus Weclapp dazukommen.
+function amountLeftHours(p) {
+  if (p.amount_ordered_hours == null) return null;
+  const used = data.entries.filter(e => e.kind === 'ist' && e.project_id === p.id).reduce((s, e) => s + (e.stunden || 0), 0);
+  return round1(p.amount_ordered_hours - used);
+}
+
 function projekteHTML() {
   const kundenOptions = Array.from(new Set(data.projects.map(p => p.kunde))).sort((a, b) => a.localeCompare(b));
   const list = filteredSortedProjects();
+  const isPeax = activeOrg === 'peax';
 
   return `
     <div class="toolbar" style="margin-bottom:10px;">
@@ -1154,17 +1167,21 @@ function projekteHTML() {
     <div class="card panel">
       <div class="table-scroll">
       <table class="projekte-table">
-        <thead><tr><th>Art</th><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th><th>Std./Wo.</th><th>Sollstunden gesamt</th><th>Pay/h · Pauschale</th><th>Charge/h · Pauschale</th><th>Marge/h · Pauschale</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
+        <thead><tr><th>Art</th><th>Kunde</th><th>Contractor</th><th>Start</th><th>Ende</th>${isPeax
+          ? '<th>Deal Value</th><th>Bestellte Std.</th><th>Verbleibend</th>'
+          : '<th>Std./Wo.</th><th>Sollstunden gesamt</th>'}<th>Pay/h · Pauschale</th><th>Charge/h · Pauschale</th><th>Marge/h · Pauschale</th><th>Marge %</th><th>Consultant(s)</th><th>Status</th><th>Aktionen</th></tr></thead>
         <tbody>
           ${list.map(p => {
             const st = computedStatus(p);
             const isPerm = p.projekttyp === 'perm';
+            const left = amountLeftHours(p);
             return `
             <tr>
               <td><span class="badge ${isPerm ? 'Perm' : 'Contract'}">${isPerm ? 'Perm' : 'Contract'}</span></td>
               <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
-              <td>${isPerm ? '–' : p.wochenstunden}</td>
-              <td>${isPerm ? '1 Std. (Pauschale)' : fmtNum(projectTotalSollHours(p), 1) + ' Std.'}</td>
+              ${isPeax
+                ? `<td>${p.deal_value != null ? fmtEUR(p.deal_value) : '–'}</td><td>${p.amount_ordered_hours != null ? fmtNum(p.amount_ordered_hours, 1) + ' Std.' : '–'}</td><td>${left != null ? fmtNum(left, 1) + ' Std.' : '–'}</td>`
+                : `<td>${isPerm ? '–' : p.wochenstunden}</td><td>${isPerm ? '1 Std. (Pauschale)' : fmtNum(projectTotalSollHours(p), 1) + ' Std.'}</td>`}
               <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
               <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
               <td>${[p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' + ') || '–'}</td>
@@ -1177,7 +1194,9 @@ function projekteHTML() {
       </table>
       </div>
     </div>
-    <div class="empty" style="padding-top:0;">"Sollstunden gesamt" wird automatisch berechnet – bei Contract aus Start-/Enddatum und Std./Woche (auf die Monate verteilt), bei Perm ist es immer 1 Std. im Monat des Startdatums, damit Charge/h die volle Pauschale abbildet.</div>
+    <div class="empty" style="padding-top:0;">${isPeax
+      ? '"Verbleibend" wird automatisch berechnet: Bestellte Stunden minus die Summe der bisher erfassten IST-Stunden dieses Projekts.'
+      : '"Sollstunden gesamt" wird automatisch berechnet – bei Contract aus Start-/Enddatum und Std./Woche (auf die Monate verteilt), bei Perm ist es immer 1 Std. im Monat des Startdatums, damit Charge/h die volle Pauschale abbildet.'}</div>
     `}
   `;
 }
@@ -1228,6 +1247,19 @@ function renderModal() {
         <div class="field"><label>Enddatum</label><input type="date" id="f_ende" value="${v.end_date || ''}"></div>
       </div>
       <div class="empty" id="permEndeHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm optional – wird beim Speichern automatisch auf das Startdatum gesetzt, falls leer (= Placement-Monat).</div>
+      ${activeOrg === 'peax' ? `
+      <div class="field-row">
+        <div class="field"><label>Bestellte Stunden (gesamt)</label><input type="number" step="1" min="0" id="f_amountordered" value="${v.amount_ordered_hours ?? ''}"></div>
+        <div class="field"><label>Status</label>
+          <select id="f_status">
+            <option value="auto" ${v.status !== 'Pausiert' ? 'selected' : ''}>Automatisch (aus Start-/Enddatum)</option>
+            <option value="Pausiert" ${v.status === 'Pausiert' ? 'selected' : ''}>Pausiert</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Deal Value (€, nur Kennzahl)</label><input type="number" step="1" id="f_dealvalue" value="${v.deal_value ?? ''}"></div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">"Bestellte Stunden" ist die insgesamt für dieses Projekt bestellte Stundenzahl (peax-Modell, statt Std./Woche). "Verbleibend" wird in der Projektliste automatisch berechnet (bestellt minus bisher erfasste IST-Stunden).</div>
+      ` : `
       <div class="field-row">
         <div class="field"><label id="f_wochenstunden_label">Std./Woche</label><input type="number" step="0.5" min="0" id="f_wochenstunden" value="${v.wochenstunden}"></div>
         <div class="field"><label>Status</label>
@@ -1239,6 +1271,7 @@ function renderModal() {
       </div>
       <div class="empty" id="permWochenHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm nicht relevant (keine Stundenabrechnung) – wird beim Speichern ignoriert.</div>
       <div class="empty" id="wochenFreitextHint" style="text-align:left;padding:0 0 8px;">40 ist nur ein Vorschlag – hier frei pro Freelancer anpassbar (z.B. 20 oder 30 bei Teilzeit).</div>
+      `}
       <div class="empty" style="text-align:left;padding:0 0 8px;">Status wird normalerweise automatisch aus Start-/Enddatum erkannt (Noch nicht aktiv / Aktiv / Beendet). "Pausiert" ist die einzige manuelle Ausnahme.</div>
       <div class="field-row">
         <div class="field"><label id="f_payH_label">Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
@@ -1267,13 +1300,13 @@ function renderModal() {
   const chargeLabel = document.getElementById('f_chargeH_label');
   function applyArtUI() {
     const isPerm = artSel.value === 'perm';
-    wochenInput.disabled = isPerm;
-    wochenLabel.textContent = isPerm ? 'Std./Woche (n/a bei Perm)' : 'Std./Woche';
+    if (wochenInput) wochenInput.disabled = isPerm;
+    if (wochenLabel) wochenLabel.textContent = isPerm ? 'Std./Woche (n/a bei Perm)' : 'Std./Woche';
     payLabel.textContent = isPerm ? 'Kosten gesamt (Pauschale)' : 'Pay / h (Kosten)';
     chargeLabel.textContent = isPerm ? 'Rechnungsbetrag (Pauschale)' : 'Charge / h (Umsatz)';
     permEndeHint.style.display = isPerm ? '' : 'none';
-    permWochenHint.style.display = isPerm ? '' : 'none';
-    wochenFreitextHint.style.display = isPerm ? 'none' : '';
+    if (permWochenHint) permWochenHint.style.display = isPerm ? '' : 'none';
+    if (wochenFreitextHint) wochenFreitextHint.style.display = isPerm ? 'none' : '';
   }
   artSel.addEventListener('change', applyArtUI);
   applyArtUI();
@@ -1285,6 +1318,7 @@ function renderModal() {
     const startDate = document.getElementById('f_start').value || null;
     let endDate = document.getElementById('f_ende').value || null;
     if (isPerm && !endDate) endDate = startDate;
+    const isPeaxModal = (c.id ? c.values.org : activeOrg) === 'peax';
     const payload = {
       org: c.id ? c.values.org : activeOrg, // Firma steht fest, sobald das Projekt existiert
       projekttyp: isPerm ? 'perm' : 'contract',
@@ -1293,13 +1327,19 @@ function renderModal() {
       rechnungsname: document.getElementById('f_rechnungsname').value.trim() || null,
       start_date: startDate,
       end_date: endDate,
-      wochenstunden: isPerm ? 0 : (Number(document.getElementById('f_wochenstunden').value) || 0),
+      wochenstunden: isPeaxModal ? 0 : (isPerm ? 0 : (Number(document.getElementById('f_wochenstunden').value) || 0)),
       pay_h: Number(document.getElementById('f_payH').value) || 0,
       charge_h: Number(document.getElementById('f_chargeH').value) || 0,
       status: document.getElementById('f_status').value === 'Pausiert' ? 'Pausiert' : 'Auto',
       consultant1_id: document.getElementById('f_consultant1').value || null,
       consultant2_id: document.getElementById('f_consultant2').value || null,
     };
+    if (isPeaxModal) {
+      const amountOrderedEl = document.getElementById('f_amountordered');
+      const dealValueEl = document.getElementById('f_dealvalue');
+      payload.amount_ordered_hours = amountOrderedEl && amountOrderedEl.value !== '' ? Number(amountOrderedEl.value) : null;
+      payload.deal_value = dealValueEl && dealValueEl.value !== '' ? Number(dealValueEl.value) : null;
+    }
     let proj = null;
     if (c.id) {
       const { data: updated } = await sb.from('projects').update(payload).eq('id', c.id).select().single();
@@ -1310,7 +1350,9 @@ function renderModal() {
     }
     modalConfig = null;
     await loadAll();
-    if (proj) await syncAutoSoll(proj);
+    // Bei peax gibt es keine monatliche SOLL-Automatik (kein Std./Woche) - dort zählt
+    // stattdessen amount_ordered_hours als einmaliges Gesamt-SOLL.
+    if (proj && proj.org !== 'peax') await syncAutoSoll(proj);
   });
 }
 
