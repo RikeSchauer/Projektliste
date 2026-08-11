@@ -1244,7 +1244,7 @@ function renderCandidateModal(c) {
         <div class="field"><label>Kunde</label><select id="cd_kunde">${kundeOptionsHTML(v.kunde_id)}</select></div>
         <div class="field"><label>Rechnungs-E-Mail Kunde</label><input type="text" id="cd_invoice_email" value="${v.invoice_email || ''}"></div>
       </div>
-      ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – oben im Tab "CRM" unter "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
+      ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – oben im Tab "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
       <div class="field">
         <label>CRM-Status</label>
         <select id="cd_status">
@@ -1324,7 +1324,7 @@ function renderCandidateModal(c) {
     syncSubProjectsFromDOM(c);
     const isPermNow = document.getElementById('cd_art').value === 'perm';
     const kundeIdVal = document.getElementById('cd_kunde').value || null;
-    if (!kundeIdVal) { alert('Bitte einen Kunden auswählen (im Tab "CRM" unter "Kunden" ggf. zuerst anlegen).'); return; }
+    if (!kundeIdVal) { alert('Bitte einen Kunden auswählen (im Tab "Kunden" ggf. zuerst anlegen).'); return; }
     const payload = {
       org: c.id ? c.values.org : activeOrg,
       contractor: document.getElementById('cd_contractor').value.trim(),
@@ -1435,7 +1435,6 @@ async function generateProjectFromSubProject(c, sp) {
 
 function crmHTML() {
   return `
-    ${kundenHTML()}
     <div class="card panel">
       <h2>CRM – Kandidaten/Freelancer</h2>
       <div class="toolbar" style="margin-bottom:10px;">
@@ -1696,7 +1695,8 @@ function render() {
       <button data-tab="provisionen" class="${activeTab === 'provisionen' ? 'active' : ''}">Provisionen</button>
       <button data-tab="ki" class="${activeTab === 'ki' ? 'active' : ''}">KI-Vorschläge${data.ki_vorschlaege.filter(v => v.status === 'pending').length ? ` (${data.ki_vorschlaege.filter(v => v.status === 'pending').length})` : ''}</button>
       <button data-tab="timesheets" class="${activeTab === 'timesheets' ? 'active' : ''}">Timesheets${data.timesheets.filter(t => t.status === 'submitted').length ? ` (${data.timesheets.filter(t => t.status === 'submitted').length})` : ''}</button>
-      <button data-tab="crm" class="${activeTab === 'crm' ? 'active' : ''}">CRM</button>
+      <button data-tab="kunden" class="${activeTab === 'kunden' ? 'active' : ''}">Kunden</button>
+      <button data-tab="crm" class="${activeTab === 'crm' ? 'active' : ''}">Kandidaten</button>
     </nav>
     <div id="tab-content"></div>
     <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
@@ -1713,6 +1713,7 @@ function render() {
   else if (activeTab === 'provisionen') content.innerHTML = reportConfig ? consultantReportHTML() : provisionenHTML();
   else if (activeTab === 'ki') content.innerHTML = kiVorschlaegeHTML();
   else if (activeTab === 'timesheets') content.innerHTML = timesheetsHTML();
+  else if (activeTab === 'kunden') content.innerHTML = kundenHTML();
   else if (activeTab === 'crm') content.innerHTML = crmHTML();
 
   wireTabEvents();
@@ -2071,7 +2072,7 @@ function renderModal() {
         <div class="field"><label>Kunde</label><select id="f_kunde">${kundeOptionsHTML(v.kunde_id)}</select></div>
         <div class="field"><label>Contractor</label><input type="text" id="f_contractor" value="${v.contractor || ''}"></div>
       </div>
-      ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – im Tab "CRM" unter "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
+      ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – im Tab "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
       <div class="field">
         <label>Projektname (optional)</label>
         <input type="text" id="f_projektname" value="${v.projektname || ''}" placeholder="z.B. bei mehreren Projekten für denselben Kunden">
@@ -2170,7 +2171,7 @@ function renderModal() {
     if (isPerm && !endDate) endDate = startDate;
     const isPeaxModal = (c.id ? c.values.org : activeOrg) === 'peax';
     const kundeIdVal = document.getElementById('f_kunde').value || null;
-    if (!kundeIdVal) { alert('Bitte einen Kunden auswählen (im Tab "CRM" unter "Kunden" ggf. zuerst anlegen).'); return; }
+    if (!kundeIdVal) { alert('Bitte einen Kunden auswählen (im Tab "Kunden" ggf. zuerst anlegen).'); return; }
     const payload = {
       org: c.id ? c.values.org : activeOrg, // Firma steht fest, sobald das Projekt existiert
       projekttyp: isPerm ? 'perm' : 'contract',
