@@ -155,7 +155,7 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], candidateProjects: [] };
 // Contractor-Portal (externe Freelancer, die NUR ihr eigenes Timesheet sehen - siehe
 // migration_contractor_timesheets.sql). Komplett getrennt vom internen App-Zustand oben.
 let contractorProfile = null;
@@ -836,22 +836,26 @@ function renderContractorModal(c) {
   const assignedIds = c.id ? new Set(data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => cp.project_id)) : new Set();
   if (!c.pickerChecked) c.pickerChecked = new Set(assignedIds);
 
-  const candidatesOfOrg = data.candidates; // schon serverseitig auf activeOrg gefiltert (siehe loadAll)
+  // Leaf-Elemente sind die CRM-Subprojekte (candidate_projects), gruppiert nach dem Kunden
+  // ihres jeweiligen Kandidaten - nicht die Kandidaten selbst, da ein Kandidat mehrere
+  // Subprojekte beim selben Kunden haben kann.
   const byKunde = new Map();
-  candidatesOfOrg.forEach(cd => {
+  data.candidateProjects.forEach(sp => {
+    const cd = candidate(sp.candidate_id);
+    if (!cd) return;
     const key = (cd.kunde || '').trim();
     if (!byKunde.has(key)) byKunde.set(key, []);
-    byKunde.get(key).push(cd);
+    byKunde.get(key).push({ sp, cd });
   });
 
   const nameNorm = (v.name || '').trim().toLowerCase();
   const suggestedKunden = new Set();
-  if (nameNorm) candidatesOfOrg.forEach(cd => { if ((cd.contractor || '').trim().toLowerCase() === nameNorm) suggestedKunden.add((cd.kunde || '').trim()); });
+  if (nameNorm) data.candidates.forEach(cd => { if ((cd.contractor || '').trim().toLowerCase() === nameNorm) suggestedKunden.add((cd.kunde || '').trim()); });
   // Kunden von bereits angehakten Projekten (auch wenn gerade erst über die Suche
   // dazugewählt) bleiben immer sichtbar, damit eine Auswahl nicht verschwindet, sobald
   // die Suche wieder leer ist.
   const checkedKunden = new Set();
-  candidatesOfOrg.forEach(cd => { if (cd.linked_project_id && c.pickerChecked.has(cd.linked_project_id)) checkedKunden.add((cd.kunde || '').trim()); });
+  data.candidateProjects.forEach(sp => { if (sp.linked_project_id && c.pickerChecked.has(sp.linked_project_id)) { const cd = candidate(sp.candidate_id); if (cd) checkedKunden.add((cd.kunde || '').trim()); } });
   // Standardmäßig (ohne Suche) nur die zu diesem Contractor passenden Kunden zeigen - nicht
   // die komplette Kundenliste der Firma. Andere Kunden findet man über die Suche.
   const defaultKunden = new Set([...suggestedKunden, ...checkedKunden]);
@@ -874,8 +878,8 @@ function renderContractorModal(c) {
         <input type="text" id="ctf_picker_search" placeholder="🔍 weiteren Kunden suchen…" value="${c.pickerSearch || ''}" style="width:100%;margin-bottom:8px;">
         <div style="display:flex;flex-direction:column;gap:2px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;max-height:260px;overflow:auto;">
           ${kundenList.length ? kundenList.map(kunde => {
-            const candidatesOfKunde = byKunde.get(kunde);
-            const checkedCount = candidatesOfKunde.filter(cd => cd.linked_project_id && c.pickerChecked.has(cd.linked_project_id)).length;
+            const itemsOfKunde = byKunde.get(kunde);
+            const checkedCount = itemsOfKunde.filter(({ sp }) => sp.linked_project_id && c.pickerChecked.has(sp.linked_project_id)).length;
             const expanded = c.pickerExpanded.has(kunde) || !!search;
             const isSuggested = suggestedKunden.has(kunde);
             return `
@@ -888,12 +892,12 @@ function renderContractorModal(c) {
               </div>
               ${expanded ? `
               <div style="padding-left:26px;display:flex;flex-direction:column;gap:4px;margin-bottom:4px;">
-                ${candidatesOfKunde.map(cd => cd.linked_project_id ? `
+                ${itemsOfKunde.map(({ sp, cd }) => sp.linked_project_id ? `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
-                    <input type="checkbox" class="ctf_project" value="${cd.linked_project_id}" ${c.pickerChecked.has(cd.linked_project_id) ? 'checked' : ''}> ${cd.projekt_name || cd.contractor}
+                    <input type="checkbox" class="ctf_project" value="${sp.linked_project_id}" ${c.pickerChecked.has(sp.linked_project_id) ? 'checked' : ''}> ${sp.projekt_name || cd.contractor}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''}
                   </label>` : `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;color:var(--muted);" title="Im CRM erst auf 'Projekt erzeugen' klicken, bevor darauf gebucht werden kann">
-                    <input type="checkbox" disabled> ${cd.projekt_name || cd.contractor} (noch kein Projekt erzeugt)
+                    <input type="checkbox" disabled> ${sp.projekt_name || cd.contractor}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''} (noch kein Projekt erzeugt)
                   </label>`).join('')}
               </div>` : ''}
             </div>`;
@@ -1042,27 +1046,117 @@ function timesheetsHTML() {
 }
 
 // ---------- CRM (Kandidaten/Freelancer) ----------
-// Ein Kandidat hat dieselben Felder wie ein Projekt in der Projektliste PLUS ein paar
-// CRM-eigene Zusatzfelder (siehe migration_crm.sql) - "Projekt erzeugen" übernimmt nur die
-// gemeinsamen Felder in einen echten projects-Eintrag, die vier CRM-only-Felder
-// (Freelancer-E-Mail, VAT-ID, Rechnungs-E-Mail des Kunden, spezifischer Projektname)
-// bleiben bewusst nur im CRM.
+// Ein Kandidat bildet die Beziehung Freelancer<->Kunde ab (Name, E-Mails, VAT-ID). Darunter
+// können mehrere Subprojekte hängen (candidate_projects) - manche Freelancer arbeiten für
+// denselben Kunden gleichzeitig an mehreren, eigenständigen Projekten mit jeweils eigenem
+// Namen, eigener Projektnummer und eigenen Konditionen. "Projekt erzeugen" übernimmt pro
+// Subprojekt nur die Felder, die es auch in der Tabelle "projects" gibt (Kunde/Contractor
+// kommen dabei vom übergeordneten Kandidaten) - Projektname, Projektnummer, E-Mails und
+// VAT-ID bleiben bewusst nur im CRM.
 
 function candidate(id) { return data.candidates.find(cd => cd.id === id); }
+function candidateProjectsOf(candidateId) { return data.candidateProjects.filter(cp => cp.candidate_id === candidateId); }
+
+function blankSubProject() {
+  return {
+    id: null, _tempId: 'new-' + Math.random().toString(36).slice(2),
+    projekt_name: '', projekt_nummer: '', projekttyp: 'contract', rechnungsname: '',
+    start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0,
+    deal_value: '', amount_ordered_hours: '', consultant1_id: '', consultant2_id: '',
+    status: 'Entwurf', linked_project_id: null,
+  };
+}
+function spKey(sp) { return sp.id || sp._tempId; }
 
 function openCandidateModal(id) {
   const cd = id ? candidate(id) : null;
+  const existing = id ? candidateProjectsOf(id).map(sp => ({ ...sp })) : [];
   modalConfig = {
     type: 'candidate', id: id || null,
-    values: cd ? { ...cd } : {
-      org: activeOrg, contractor: '', freelancer_email: '', vat_id: '',
-      kunde: '', invoice_email: '', projekt_name: '',
-      projekttyp: 'contract', rechnungsname: '', start_date: '', end_date: '',
-      wochenstunden: 40, pay_h: 0, charge_h: 0, deal_value: '', amount_ordered_hours: '',
-      consultant1_id: '', consultant2_id: '', status: 'Entwurf',
-    },
+    values: cd ? { ...cd } : { org: activeOrg, contractor: '', freelancer_email: '', vat_id: '', kunde: '', invoice_email: '', status: 'Aktiv' },
+    subProjects: existing.length ? existing : [blankSubProject()],
   };
   render();
+}
+
+// Liest die aktuellen Werte aller Subprojekt-Karten aus dem DOM zurück in modalConfig.subProjects -
+// muss vor jedem Re-Render (Karte hinzufügen/entfernen) aufgerufen werden, sonst gingen bereits
+// eingetragene Werte in anderen Karten verloren.
+function syncSubProjectsFromDOM(c) {
+  const isPeax = activeOrg === 'peax';
+  c.subProjects.forEach(sp => {
+    const k = spKey(sp);
+    const el = id => document.getElementById(id + '_' + k);
+    const artEl = el('sp_art');
+    if (!artEl) return; // Karte nicht (mehr) im DOM - unverändert lassen
+    const isPerm = artEl.value === 'perm';
+    sp.projekt_name = el('sp_name').value.trim();
+    sp.projekt_nummer = el('sp_nummer').value.trim();
+    sp.projekttyp = isPerm ? 'perm' : 'contract';
+    sp.rechnungsname = el('sp_rechnungsname').value.trim() || null;
+    sp.start_date = el('sp_start').value || null;
+    sp.end_date = el('sp_ende').value || (isPerm ? sp.start_date : null);
+    sp.pay_h = Number(el('sp_payH').value) || 0;
+    sp.charge_h = Number(el('sp_chargeH').value) || 0;
+    sp.consultant1_id = el('sp_consultant1').value || null;
+    sp.consultant2_id = el('sp_consultant2').value || null;
+    if (isPeax) {
+      const amountEl = el('sp_amountordered'), dealEl = el('sp_dealvalue');
+      sp.amount_ordered_hours = amountEl && amountEl.value !== '' ? Number(amountEl.value) : null;
+      sp.deal_value = dealEl && dealEl.value !== '' ? Number(dealEl.value) : null;
+      sp.wochenstunden = 0;
+    } else {
+      const wochenEl = el('sp_wochenstunden');
+      sp.wochenstunden = isPerm ? 0 : (wochenEl ? Number(wochenEl.value) || 0 : 0);
+    }
+  });
+}
+
+function subProjectCardHTML(sp, idx, isPeax) {
+  const k = spKey(sp);
+  const isPerm = sp.projekttyp === 'perm';
+  return `
+    <div class="card" style="margin-bottom:10px;background:var(--bg);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <strong style="font-size:13px;">Subprojekt ${idx + 1}${sp.linked_project_id ? ' <span class="mini-badge auto">Projekt erzeugt</span>' : ' <span class="mini-badge manuell">Entwurf</span>'}</strong>
+        <div>
+          ${sp.linked_project_id ? '' : `<button class="link" data-generate-sp="${k}">Projekt erzeugen</button>`}
+          <button class="link danger" data-remove-sp="${k}">Entfernen</button>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Projektname</label><input type="text" id="sp_name_${k}" value="${sp.projekt_name || ''}"></div>
+        <div class="field"><label>Projektnummer</label><input type="text" id="sp_nummer_${k}" value="${sp.projekt_nummer || ''}"></div>
+      </div>
+      <div class="field">
+        <label>Art</label>
+        <select id="sp_art_${k}">
+          <option value="contract" ${!isPerm ? 'selected' : ''}>Contract (Abrechnung nach Stunden)</option>
+          <option value="perm" ${isPerm ? 'selected' : ''}>Perm (Pauschale / Vermittlungshonorar)</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field"><label>Startdatum</label><input type="date" id="sp_start_${k}" value="${sp.start_date || ''}"></div>
+        <div class="field"><label>Enddatum</label><input type="date" id="sp_ende_${k}" value="${sp.end_date || ''}"></div>
+      </div>
+      ${isPeax ? `
+      <div class="field-row">
+        <div class="field"><label>Bestellte Stunden (gesamt)</label><input type="number" step="1" min="0" id="sp_amountordered_${k}" value="${sp.amount_ordered_hours ?? ''}"></div>
+        <div class="field"><label>Deal Value (€)</label><input type="number" step="1" id="sp_dealvalue_${k}" value="${sp.deal_value ?? ''}"></div>
+      </div>
+      ` : `
+      <div class="field"><label>Std./Woche</label><input type="number" step="0.5" min="0" id="sp_wochenstunden_${k}" value="${sp.wochenstunden}" ${isPerm ? 'disabled' : ''}></div>
+      `}
+      <div class="field-row">
+        <div class="field"><label>Pay / h (Kosten)</label><input type="number" id="sp_payH_${k}" value="${sp.pay_h}"></div>
+        <div class="field"><label>Charge / h (Umsatz)</label><input type="number" id="sp_chargeH_${k}" value="${sp.charge_h}"></div>
+      </div>
+      <div class="field"><label>Rechnungsname/Firma (optional)</label><input type="text" id="sp_rechnungsname_${k}" value="${sp.rechnungsname || ''}"></div>
+      <div class="field-row">
+        <div class="field"><label>Consultant 1</label><select id="sp_consultant1_${k}">${consultantOptionsHTML(sp.consultant1_id)}</select></div>
+        <div class="field"><label>Consultant 2 (optional)</label><select id="sp_consultant2_${k}">${consultantOptionsHTML(sp.consultant2_id)}</select></div>
+      </div>
+    </div>`;
 }
 
 function renderCandidateModal(c) {
@@ -1082,39 +1176,6 @@ function renderCandidateModal(c) {
         <div class="field"><label>Kunde</label><input type="text" id="cd_kunde" value="${v.kunde || ''}"></div>
         <div class="field"><label>Rechnungs-E-Mail Kunde</label><input type="text" id="cd_invoice_email" value="${v.invoice_email || ''}"></div>
       </div>
-      <div class="field"><label>Spezifisches Projekt (für Timesheet)</label><input type="text" id="cd_projekt_name" value="${v.projekt_name || ''}"></div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Diese vier Felder oben bleiben nur im CRM - sie werden beim "Projekt erzeugen" nicht in die Projektliste übernommen.</div>
-      <div class="field">
-        <label>Art</label>
-        <select id="cd_art">
-          <option value="contract" ${v.projekttyp !== 'perm' ? 'selected' : ''}>Contract (Abrechnung nach Stunden)</option>
-          <option value="perm" ${v.projekttyp === 'perm' ? 'selected' : ''}>Perm (Pauschale / Vermittlungshonorar)</option>
-        </select>
-      </div>
-      <div class="field-row">
-        <div class="field"><label>Startdatum</label><input type="date" id="cd_start" value="${v.start_date || ''}"></div>
-        <div class="field"><label>Enddatum</label><input type="date" id="cd_ende" value="${v.end_date || ''}"></div>
-      </div>
-      ${isPeax ? `
-      <div class="field-row">
-        <div class="field"><label>Bestellte Stunden (gesamt)</label><input type="number" step="1" min="0" id="cd_amountordered" value="${v.amount_ordered_hours ?? ''}"></div>
-        <div class="field"><label>Deal Value (€)</label><input type="number" step="1" id="cd_dealvalue" value="${v.deal_value ?? ''}"></div>
-      </div>
-      ` : `
-      <div class="field"><label id="cd_wochen_label">Std./Woche</label><input type="number" step="0.5" min="0" id="cd_wochenstunden" value="${v.wochenstunden}"></div>
-      `}
-      <div class="field-row">
-        <div class="field"><label id="cd_payH_label">Pay / h (Kosten)</label><input type="number" id="cd_payH" value="${v.pay_h}"></div>
-        <div class="field"><label id="cd_chargeH_label">Charge / h (Umsatz)</label><input type="number" id="cd_chargeH" value="${v.charge_h}"></div>
-      </div>
-      <div class="field">
-        <label>Rechnungsname/Firma (optional)</label>
-        <input type="text" id="cd_rechnungsname" value="${v.rechnungsname || ''}">
-      </div>
-      <div class="field-row">
-        <div class="field"><label>Consultant 1</label><select id="cd_consultant1">${consultantOptionsHTML(v.consultant1_id)}</select></div>
-        <div class="field"><label>Consultant 2 (optional)</label><select id="cd_consultant2">${consultantOptionsHTML(v.consultant2_id)}</select></div>
-      </div>
       <div class="field">
         <label>CRM-Status</label>
         <select id="cd_status">
@@ -1123,35 +1184,47 @@ function renderCandidateModal(c) {
           <option value="Archiviert" ${v.status === 'Archiviert' ? 'selected' : ''}>Archiviert</option>
         </select>
       </div>
-      ${v.linked_project_id ? `<div class="banner info">Für diesen Kandidaten wurde bereits ein Projekt erzeugt.</div>` : ''}
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Diese Felder oben bleiben nur im CRM - sie werden beim "Projekt erzeugen" nicht in die Projektliste übernommen.</div>
+      <h3 style="font-size:14px;margin:16px 0 8px;">Projekte bei diesem Kunden</h3>
+      <div id="subProjectsContainer">
+        ${c.subProjects.map((sp, idx) => subProjectCardHTML(sp, idx, isPeax)).join('')}
+      </div>
+      <button class="btn" id="addSubProjectBtn" style="width:100%;margin-bottom:14px;">+ Weiteres Projekt hinzufügen</button>
       <div class="modal-actions">
-        ${c.id ? '<button class="btn danger" id="modalDeleteCandidate">Löschen</button>' : ''}
+        ${c.id ? '<button class="btn danger" id="modalDeleteCandidate">Kandidat löschen</button>' : ''}
         <button class="btn" id="modalCancelCandidate">Abbrechen</button>
         <button class="btn primary" id="modalSaveCandidate">Speichern</button>
       </div>
     </div>`;
   document.getElementById('app').appendChild(overlay);
 
-  const artSel = document.getElementById('cd_art');
-  const wochenInput = document.getElementById('cd_wochenstunden');
-  const payLabel = document.getElementById('cd_payH_label');
-  const chargeLabel = document.getElementById('cd_chargeH_label');
-  function applyArtUI() {
-    const isPerm = artSel.value === 'perm';
-    if (wochenInput) wochenInput.disabled = isPerm;
-    payLabel.textContent = isPerm ? 'Kosten gesamt (Pauschale)' : 'Pay / h (Kosten)';
-    chargeLabel.textContent = isPerm ? 'Rechnungsbetrag (Pauschale)' : 'Charge / h (Umsatz)';
-  }
-  artSel.addEventListener('change', applyArtUI);
-  applyArtUI();
+  c.subProjects.forEach(sp => {
+    const k = spKey(sp);
+    const artEl = document.getElementById('sp_art_' + k);
+    const wochenEl = document.getElementById('sp_wochenstunden_' + k);
+    if (artEl) artEl.addEventListener('change', () => { if (wochenEl) wochenEl.disabled = artEl.value === 'perm'; });
+  });
+
+  document.getElementById('addSubProjectBtn').addEventListener('click', () => {
+    syncSubProjectsFromDOM(c);
+    c.subProjects.push(blankSubProject());
+    render();
+  });
+  document.querySelectorAll('[data-remove-sp]').forEach(b => b.addEventListener('click', () => {
+    syncSubProjectsFromDOM(c);
+    c.subProjects = c.subProjects.filter(sp => spKey(sp) !== b.dataset.removeSp);
+    render();
+  }));
+  document.querySelectorAll('[data-generate-sp]').forEach(b => b.addEventListener('click', async () => {
+    syncSubProjectsFromDOM(c);
+    const sp = c.subProjects.find(x => spKey(x) === b.dataset.generateSp);
+    if (sp) await generateProjectFromSubProject(c, sp);
+  }));
 
   document.getElementById('modalCancelCandidate').addEventListener('click', () => { modalConfig = null; render(); });
   if (c.id) document.getElementById('modalDeleteCandidate').addEventListener('click', () => deleteCandidate(c.id));
   document.getElementById('modalSaveCandidate').addEventListener('click', async () => {
-    const isPerm = document.getElementById('cd_art').value === 'perm';
-    const startDate = document.getElementById('cd_start').value || null;
-    let endDate = document.getElementById('cd_ende').value || null;
-    if (isPerm && !endDate) endDate = startDate;
+    syncSubProjectsFromDOM(c);
     const payload = {
       org: c.id ? c.values.org : activeOrg,
       contractor: document.getElementById('cd_contractor').value.trim(),
@@ -1159,68 +1232,77 @@ function renderCandidateModal(c) {
       vat_id: document.getElementById('cd_vat_id').value.trim() || null,
       kunde: document.getElementById('cd_kunde').value.trim(),
       invoice_email: document.getElementById('cd_invoice_email').value.trim() || null,
-      projekt_name: document.getElementById('cd_projekt_name').value.trim() || null,
-      projekttyp: isPerm ? 'perm' : 'contract',
-      rechnungsname: document.getElementById('cd_rechnungsname').value.trim() || null,
-      start_date: startDate,
-      end_date: endDate,
-      wochenstunden: isPeax ? 0 : (isPerm ? 0 : (Number(document.getElementById('cd_wochenstunden').value) || 0)),
-      pay_h: Number(document.getElementById('cd_payH').value) || 0,
-      charge_h: Number(document.getElementById('cd_chargeH').value) || 0,
-      consultant1_id: document.getElementById('cd_consultant1').value || null,
-      consultant2_id: document.getElementById('cd_consultant2').value || null,
       status: document.getElementById('cd_status').value,
     };
-    if (isPeax) {
-      const amountOrderedEl = document.getElementById('cd_amountordered');
-      const dealValueEl = document.getElementById('cd_dealvalue');
-      payload.amount_ordered_hours = amountOrderedEl && amountOrderedEl.value !== '' ? Number(amountOrderedEl.value) : null;
-      payload.deal_value = dealValueEl && dealValueEl.value !== '' ? Number(dealValueEl.value) : null;
+    let candidateId = c.id;
+    if (candidateId) await sb.from('candidates').update(payload).eq('id', candidateId);
+    else { const { data: inserted } = await sb.from('candidates').insert(payload).select().single(); candidateId = inserted && inserted.id; }
+    if (candidateId) {
+      const existingIds = new Set(c.id ? candidateProjectsOf(c.id).map(sp => sp.id) : []);
+      const keptIds = new Set(c.subProjects.filter(sp => sp.id).map(sp => sp.id));
+      for (const oldId of existingIds) { if (!keptIds.has(oldId)) await sb.from('candidate_projects').delete().eq('id', oldId); }
+      for (const sp of c.subProjects) {
+        const spPayload = {
+          candidate_id: candidateId, projekt_name: sp.projekt_name || null, projekt_nummer: sp.projekt_nummer || null,
+          projekttyp: sp.projekttyp, rechnungsname: sp.rechnungsname, start_date: sp.start_date, end_date: sp.end_date,
+          wochenstunden: sp.wochenstunden, pay_h: sp.pay_h, charge_h: sp.charge_h,
+          deal_value: sp.deal_value, amount_ordered_hours: sp.amount_ordered_hours,
+          consultant1_id: sp.consultant1_id, consultant2_id: sp.consultant2_id,
+        };
+        if (sp.id) await sb.from('candidate_projects').update(spPayload).eq('id', sp.id);
+        else await sb.from('candidate_projects').insert(spPayload);
+      }
     }
-    if (c.id) await sb.from('candidates').update(payload).eq('id', c.id);
-    else await sb.from('candidates').insert(payload);
     modalConfig = null;
     await loadAll();
   });
 }
 
 async function deleteCandidate(id) {
-  if (!confirm('Kandidat aus dem CRM löschen? Ein daraus bereits erzeugtes Projekt bleibt davon unberührt.')) return;
+  if (!confirm('Kandidat inkl. aller Subprojekte aus dem CRM löschen? Bereits daraus erzeugte Projekte bleiben davon unberührt.')) return;
   await sb.from('candidates').delete().eq('id', id);
   modalConfig = null;
   await loadAll();
 }
 
-// Erzeugt aus einem CRM-Kandidaten einen echten Eintrag im Tab "Projekte" - übernimmt
-// bewusst NUR die Felder, die es auch in der Tabelle "projects" gibt.
-async function generateProjectFromCandidate(id) {
-  const cd = candidate(id);
-  if (!cd) return;
-  if (cd.linked_project_id && !confirm('Für diesen Kandidaten wurde bereits ein Projekt erzeugt. Trotzdem ein weiteres, neues Projekt anlegen?')) return;
+// Erzeugt aus einem CRM-Subprojekt einen echten Eintrag im Tab "Projekte" - Kunde/Contractor
+// kommen vom übergeordneten Kandidaten, alles andere vom Subprojekt selbst. Übernimmt bewusst
+// NUR die Felder, die es auch in der Tabelle "projects" gibt.
+async function generateProjectFromSubProject(c, sp) {
+  if (sp.linked_project_id && !confirm('Für dieses Subprojekt wurde bereits ein Projekt erzeugt. Trotzdem ein weiteres, neues Projekt anlegen?')) return;
+  const org = c.id ? c.values.org : activeOrg;
+  const kunde = document.getElementById('cd_kunde') ? document.getElementById('cd_kunde').value.trim() : c.values.kunde;
+  const contractor = document.getElementById('cd_contractor') ? document.getElementById('cd_contractor').value.trim() : c.values.contractor;
   const payload = {
-    org: cd.org,
-    projekttyp: cd.projekttyp,
-    kunde: cd.kunde,
-    contractor: cd.contractor,
-    rechnungsname: cd.rechnungsname,
-    start_date: cd.start_date,
-    end_date: cd.end_date,
-    wochenstunden: cd.wochenstunden,
-    pay_h: cd.pay_h,
-    charge_h: cd.charge_h,
-    consultant1_id: cd.consultant1_id,
-    consultant2_id: cd.consultant2_id,
+    org, projekttyp: sp.projekttyp, kunde, contractor,
+    rechnungsname: sp.rechnungsname, start_date: sp.start_date, end_date: sp.end_date,
+    wochenstunden: sp.wochenstunden, pay_h: sp.pay_h, charge_h: sp.charge_h,
+    consultant1_id: sp.consultant1_id, consultant2_id: sp.consultant2_id,
     status: 'Auto',
   };
-  if (cd.org === 'peax') {
-    payload.amount_ordered_hours = cd.amount_ordered_hours;
-    payload.deal_value = cd.deal_value;
-  }
+  if (org === 'peax') { payload.amount_ordered_hours = sp.amount_ordered_hours; payload.deal_value = sp.deal_value; }
   const { data: inserted, error } = await sb.from('projects').insert(payload).select().single();
   if (error) { alert(error.message); return; }
-  await sb.from('candidates').update({ linked_project_id: inserted.id, status: 'Projekt erzeugt' }).eq('id', id);
+  sp.linked_project_id = inserted.id;
+  sp.status = 'Projekt erzeugt';
+  if (sp.id) {
+    await sb.from('candidate_projects').update({ linked_project_id: inserted.id, status: 'Projekt erzeugt' }).eq('id', sp.id);
+  } else {
+    // Subprojekt existiert noch nicht in der DB (neu angelegt, noch nicht gespeichert) -
+    // gleich mit anlegen, damit die Verknüpfung nicht beim nächsten Speichern verloren geht.
+    const { data: spInserted } = await sb.from('candidate_projects').insert({
+      candidate_id: c.id, projekt_name: sp.projekt_name || null, projekt_nummer: sp.projekt_nummer || null,
+      projekttyp: sp.projekttyp, rechnungsname: sp.rechnungsname, start_date: sp.start_date, end_date: sp.end_date,
+      wochenstunden: sp.wochenstunden, pay_h: sp.pay_h, charge_h: sp.charge_h,
+      deal_value: sp.deal_value, amount_ordered_hours: sp.amount_ordered_hours,
+      consultant1_id: sp.consultant1_id, consultant2_id: sp.consultant2_id,
+      linked_project_id: inserted.id, status: 'Projekt erzeugt',
+    }).select().single();
+    if (spInserted) sp.id = spInserted.id;
+  }
   await loadAll();
   await syncAutoSoll(inserted);
+  render();
 }
 
 function crmHTML() {
@@ -1230,23 +1312,24 @@ function crmHTML() {
       <div class="toolbar" style="margin-bottom:10px;">
         <button class="btn primary" id="addCandidateBtn">+ Neuer Kandidat</button>
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 10px;">Perspektivisch sollen diese Daten aus einem separaten Tool gezogen werden (aktuell noch im Aufbau) - bis dahin hier direkt pflegen. "Projekt erzeugen" legt daraus einen echten Eintrag im Tab "Projekte" an (ohne die CRM-eigenen Felder E-Mail/VAT-ID/Rechnungs-E-Mail/spezifischer Projektname).</div>
+      <div class="empty" style="text-align:left;padding:0 0 10px;">Perspektivisch sollen diese Daten aus einem separaten Tool gezogen werden (aktuell noch im Aufbau) - bis dahin hier direkt pflegen. Ein Kandidat kann mehrere Subprojekte beim selben Kunden haben (je mit eigenem Projektname/-nummer). "Projekt erzeugen" legt pro Subprojekt einen echten Eintrag im Tab "Projekte" an.</div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Freelancer</th><th>Kunde</th><th>Projekt</th><th>Zeitraum</th><th>CRM-Status</th><th>Projekt-Status</th><th>Aktionen</th></tr></thead>
+          <thead><tr><th>Freelancer</th><th>Kunde</th><th>Subprojekte</th><th>CRM-Status</th><th>Aktionen</th></tr></thead>
           <tbody>
-            ${data.candidates.map(cd => `<tr>
-              <td>${cd.contractor}</td><td>${cd.kunde}</td><td>${cd.projekt_name || '–'}</td>
-              <td>${fmtDate(cd.start_date)} – ${fmtDate(cd.end_date)}</td>
+            ${data.candidates.map(cd => {
+              const sps = candidateProjectsOf(cd.id);
+              return `<tr>
+              <td>${cd.contractor}</td><td>${cd.kunde}</td>
+              <td>${sps.length ? sps.map(sp => `${sp.projekt_name || '(ohne Namen)'}${sp.projekt_nummer ? ' #' + sp.projekt_nummer : ''} <span class="mini-badge ${sp.linked_project_id ? 'auto' : 'manuell'}">${sp.linked_project_id ? 'erzeugt' : 'Entwurf'}</span>`).join('<br>') : '<span class="empty" style="padding:0;">keine</span>'}</td>
               <td>${cd.status}</td>
-              <td>${cd.linked_project_id ? '<span class="mini-badge auto">Projekt erzeugt</span>' : '<span class="mini-badge manuell">noch kein Projekt</span>'}</td>
               <td>
                 <button class="link" data-edit-candidate="${cd.id}">Bearbeiten</button>
-                <button class="link" data-generate-candidate="${cd.id}">Projekt erzeugen</button>
                 <button class="link danger" data-del-candidate="${cd.id}">Löschen</button>
               </td>
-            </tr>`).join('')}
-            ${!data.candidates.length ? '<tr><td colspan="7" class="empty">Noch keine Kandidaten im CRM.</td></tr>' : ''}
+            </tr>`;
+            }).join('')}
+            ${!data.candidates.length ? '<tr><td colspan="5" class="empty">Noch keine Kandidaten im CRM.</td></tr>' : ''}
           </tbody>
         </table>
       </div>
@@ -1261,7 +1344,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
@@ -1278,8 +1361,10 @@ async function loadAll() {
     sb.from('contractor_projects').select('*'),
     sb.from('timesheets').select('*').order('month', { ascending: false }),
     sb.from('timesheet_days').select('*'),
-    // candidates (CRM) ist ebenfalls optional (siehe migration_crm.sql).
+    // candidates/candidate_projects (CRM) sind ebenfalls optional (siehe migration_crm.sql
+    // und migration_crm_subprojekte.sql).
     sb.from('candidates').select('*').order('created_at', { ascending: false }),
+    sb.from('candidate_projects').select('*').order('created_at', { ascending: false }),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -1289,7 +1374,7 @@ async function loadAll() {
   if (e4) console.warn('ki_vorschlaege konnte nicht geladen werden (Migration ausgeführt?)', e4);
   if (e5) console.warn('team_memberships konnte nicht geladen werden (migration_team_bonus.sql ausgeführt?)', e5);
   if (e6 || e7 || e8 || e9) console.warn('Contractor-Timesheets konnten nicht geladen werden (migration_contractor_timesheets.sql ausgeführt?)', e6, e7, e8, e9);
-  if (e10) console.warn('CRM-Kandidaten konnten nicht geladen werden (migration_crm.sql ausgeführt?)', e10);
+  if (e10 || e11) console.warn('CRM-Kandidaten konnten nicht geladen werden (migration_crm.sql/migration_crm_subprojekte.sql ausgeführt?)', e10, e11);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
@@ -1300,6 +1385,8 @@ async function loadAll() {
   const timesheetIds = new Set(data.timesheets.map(t => t.id));
   data.timesheetDays = (timesheetDays || []).filter(d => timesheetIds.has(d.timesheet_id));
   data.candidates = (candidates || []).filter(cd => cd.org === activeOrg);
+  const candidateIds = new Set(data.candidates.map(cd => cd.id));
+  data.candidateProjects = (candidateProjects || []).filter(cp => candidateIds.has(cp.candidate_id));
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   data.ki_vorschlaege = kiVorschlaege || [];
   data.team_memberships = teamMemberships || [];
@@ -1350,6 +1437,7 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheets' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheet_days' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'candidate_projects' }, () => loadAll())
     .subscribe();
 }
 
@@ -2382,7 +2470,6 @@ function wireTabEvents() {
   if (addCandidateBtn) addCandidateBtn.addEventListener('click', () => openCandidateModal(null));
   document.querySelectorAll('[data-edit-candidate]').forEach(b => b.addEventListener('click', () => openCandidateModal(b.dataset.editCandidate)));
   document.querySelectorAll('[data-del-candidate]').forEach(b => b.addEventListener('click', () => deleteCandidate(b.dataset.delCandidate)));
-  document.querySelectorAll('[data-generate-candidate]').forEach(b => b.addEventListener('click', () => generateProjectFromCandidate(b.dataset.generateCandidate)));
 }
 
 // ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
