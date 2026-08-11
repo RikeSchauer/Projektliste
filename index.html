@@ -155,7 +155,7 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], candidateProjects: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], candidateProjects: [], kunden: [] };
 // Contractor-Portal (externe Freelancer, die NUR ihr eigenes Timesheet sehen - siehe
 // migration_contractor_timesheets.sql). Komplett getrennt vom internen App-Zustand oben.
 let contractorProfile = null;
@@ -837,33 +837,34 @@ function renderContractorModal(c) {
   if (!c.pickerChecked) c.pickerChecked = new Set(assignedIds);
 
   // Leaf-Elemente sind die CRM-Subprojekte (candidate_projects), gruppiert nach dem Kunden
-  // ihres jeweiligen Kandidaten - nicht die Kandidaten selbst, da ein Kandidat mehrere
-  // Subprojekte beim selben Kunden haben kann.
+  // ihres jeweiligen Kandidaten (kunde_id, nicht mehr nach Textvergleich - vermeidet die
+  // früheren Gruppierungs-Doppler durch Tippfehler/Leerzeichen im Freitext) - nicht die
+  // Kandidaten selbst, da ein Kandidat mehrere Subprojekte beim selben Kunden haben kann.
   const byKunde = new Map();
   data.candidateProjects.forEach(sp => {
     const cd = candidate(sp.candidate_id);
-    if (!cd) return;
-    const key = (cd.kunde || '').trim();
+    if (!cd || !cd.kunde_id) return;
+    const key = cd.kunde_id;
     if (!byKunde.has(key)) byKunde.set(key, []);
     byKunde.get(key).push({ sp, cd });
   });
 
   const nameNorm = (v.name || '').trim().toLowerCase();
   const suggestedKunden = new Set();
-  if (nameNorm) data.candidates.forEach(cd => { if ((cd.contractor || '').trim().toLowerCase() === nameNorm) suggestedKunden.add((cd.kunde || '').trim()); });
+  if (nameNorm) data.candidates.forEach(cd => { if (cd.kunde_id && (cd.contractor || '').trim().toLowerCase() === nameNorm) suggestedKunden.add(cd.kunde_id); });
   // Kunden von bereits angehakten Projekten (auch wenn gerade erst über die Suche
   // dazugewählt) bleiben immer sichtbar, damit eine Auswahl nicht verschwindet, sobald
   // die Suche wieder leer ist.
   const checkedKunden = new Set();
-  data.candidateProjects.forEach(sp => { if (sp.linked_project_id && c.pickerChecked.has(sp.linked_project_id)) { const cd = candidate(sp.candidate_id); if (cd) checkedKunden.add((cd.kunde || '').trim()); } });
+  data.candidateProjects.forEach(sp => { if (sp.linked_project_id && c.pickerChecked.has(sp.linked_project_id)) { const cd = candidate(sp.candidate_id); if (cd && cd.kunde_id) checkedKunden.add(cd.kunde_id); } });
   // Standardmäßig (ohne Suche) nur die zu diesem Contractor passenden Kunden zeigen - nicht
   // die komplette Kundenliste der Firma. Andere Kunden findet man über die Suche.
   const defaultKunden = new Set([...suggestedKunden, ...checkedKunden]);
   if (!c.pickerExpandedInit) { defaultKunden.forEach(k => c.pickerExpanded.add(k)); c.pickerExpandedInit = true; }
 
   const search = (c.pickerSearch || '').trim().toLowerCase();
-  const kundenList = Array.from(byKunde.keys()).sort((a, b) => a.localeCompare(b))
-    .filter(k => search ? k.toLowerCase().includes(search) : defaultKunden.has(k));
+  const kundenList = Array.from(byKunde.keys()).sort((a, b) => kundeName(a).localeCompare(kundeName(b)))
+    .filter(kid => search ? kundeName(kid).toLowerCase().includes(search) : defaultKunden.has(kid));
 
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
@@ -877,16 +878,16 @@ function renderContractorModal(c) {
         <label>Kunde / Subprojekte aus dem CRM (worauf dieser Contractor Stunden buchen darf)</label>
         <input type="text" id="ctf_picker_search" placeholder="🔍 weiteren Kunden suchen…" value="${c.pickerSearch || ''}" style="width:100%;margin-bottom:8px;">
         <div style="display:flex;flex-direction:column;gap:2px;border:1px solid var(--border);border-radius:8px;padding:8px 10px;max-height:260px;overflow:auto;">
-          ${kundenList.length ? kundenList.map(kunde => {
-            const itemsOfKunde = byKunde.get(kunde);
+          ${kundenList.length ? kundenList.map(kid => {
+            const itemsOfKunde = byKunde.get(kid);
             const checkedCount = itemsOfKunde.filter(({ sp }) => sp.linked_project_id && c.pickerChecked.has(sp.linked_project_id)).length;
-            const expanded = c.pickerExpanded.has(kunde) || !!search;
-            const isSuggested = suggestedKunden.has(kunde);
+            const expanded = c.pickerExpanded.has(kid) || !!search;
+            const isSuggested = suggestedKunden.has(kid);
             return `
             <div>
-              <div data-toggle-kunde="${kunde}" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:5px 2px;font-weight:600;font-size:13px;">
+              <div data-toggle-kunde="${kid}" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:5px 2px;font-weight:600;font-size:13px;">
                 <span style="display:inline-block;width:14px;">${expanded ? '▾' : '▸'}</span>
-                <span>${kunde}</span>
+                <span>${kundeName(kid)}</span>
                 ${checkedCount ? `<span class="mini-badge manuell">${checkedCount}</span>` : ''}
                 ${isSuggested ? `<span class="mini-badge auto">Vorschlag</span>` : ''}
               </div>
@@ -1057,6 +1058,118 @@ function timesheetsHTML() {
 function candidate(id) { return data.candidates.find(cd => cd.id === id); }
 function candidateProjectsOf(candidateId) { return data.candidateProjects.filter(cp => cp.candidate_id === candidateId); }
 
+// ---------- CRM (Kunden-Stammdaten: Anschrift, VAT-ID, Ansprechpartner, Payment Terms) ----------
+// Projekte und Kandidaten wählen ihren Kunden per Dropdown aus dieser Liste (kunde_id) statt per
+// Freitext - siehe migration_kunden.sql. Das bisherige Textfeld "kunde" bleibt als denormalisierter
+// Anzeigename bestehen (wird beim Speichern/Umbenennen automatisch synchron gehalten), damit alle
+// bestehenden Auswertungen (Filter, Gruppierung, Tortendiagramm, Suche) unverändert weiterlaufen.
+function kunde(id) { return data.kunden.find(k => k.id === id); }
+function kundeName(id) { const k = kunde(id); return k ? k.name : '–'; }
+function kundeOptionsHTML(selectedId) {
+  const sorted = [...data.kunden].sort((a, b) => a.name.localeCompare(b.name));
+  return '<option value="">– bitte wählen –</option>' +
+    sorted.map(k => `<option value="${k.id}" ${selectedId === k.id ? 'selected' : ''}>${k.name}</option>`).join('');
+}
+
+function openKundeModal(id) {
+  const k = id ? kunde(id) : null;
+  modalConfig = {
+    type: 'kunde', id: id || null,
+    values: k ? { ...k } : { org: activeOrg, name: '', strasse: '', plz: '', ort: '', land: '', vat_id: '', email: '', ansprechpartner: '', payment_terms: '' },
+  };
+  render();
+}
+
+function renderKundeModal(c) {
+  const v = c.values;
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <h3>${c.id ? 'Kunde bearbeiten' : 'Neuer Kunde'}</h3>
+      <div class="field"><label>Name (Firma)</label><input type="text" id="kf_name" value="${v.name || ''}"></div>
+      <div class="field"><label>Straße</label><input type="text" id="kf_strasse" value="${v.strasse || ''}"></div>
+      <div class="field-row">
+        <div class="field"><label>PLZ</label><input type="text" id="kf_plz" value="${v.plz || ''}"></div>
+        <div class="field"><label>Ort</label><input type="text" id="kf_ort" value="${v.ort || ''}"></div>
+      </div>
+      <div class="field"><label>Land</label><input type="text" id="kf_land" value="${v.land || ''}"></div>
+      <div class="field"><label>VAT-ID</label><input type="text" id="kf_vat_id" value="${v.vat_id || ''}"></div>
+      <div class="field-row">
+        <div class="field"><label>E-Mail</label><input type="text" id="kf_email" value="${v.email || ''}"></div>
+        <div class="field"><label>Ansprechpartner</label><input type="text" id="kf_ansprechpartner" value="${v.ansprechpartner || ''}"></div>
+      </div>
+      <div class="field"><label>Payment Terms</label><input type="text" id="kf_payment_terms" value="${v.payment_terms || ''}" placeholder="z.B. 30 Tage netto"></div>
+      <div class="modal-actions">
+        ${c.id ? '<button class="btn danger" id="modalDeleteKunde">Löschen</button>' : ''}
+        <button class="btn" id="modalCancelKunde">Abbrechen</button>
+        <button class="btn primary" id="modalSaveKunde">Speichern</button>
+      </div>
+    </div>`;
+  document.getElementById('app').appendChild(overlay);
+
+  document.getElementById('modalCancelKunde').addEventListener('click', () => { modalConfig = null; render(); });
+  if (c.id) document.getElementById('modalDeleteKunde').addEventListener('click', () => deleteKunde(c.id));
+  document.getElementById('modalSaveKunde').addEventListener('click', async () => {
+    const payload = {
+      org: c.id ? c.values.org : activeOrg,
+      name: document.getElementById('kf_name').value.trim(),
+      strasse: document.getElementById('kf_strasse').value.trim() || null,
+      plz: document.getElementById('kf_plz').value.trim() || null,
+      ort: document.getElementById('kf_ort').value.trim() || null,
+      land: document.getElementById('kf_land').value.trim() || null,
+      vat_id: document.getElementById('kf_vat_id').value.trim() || null,
+      email: document.getElementById('kf_email').value.trim() || null,
+      ansprechpartner: document.getElementById('kf_ansprechpartner').value.trim() || null,
+      payment_terms: document.getElementById('kf_payment_terms').value.trim() || null,
+    };
+    if (!payload.name) { alert('Bitte einen Namen für den Kunden eintragen.'); return; }
+    if (c.id) await sb.from('kunden').update(payload).eq('id', c.id);
+    else await sb.from('kunden').insert(payload);
+    modalConfig = null;
+    await loadAll();
+  });
+}
+
+async function deleteKunde(id) {
+  if (!confirm('Kunden löschen? Projekte/Kandidaten, die auf diesen Kunden verweisen, verlieren dabei nur die Verknüpfung (der bisherige Kundenname bleibt als Text stehen).')) return;
+  await sb.from('kunden').delete().eq('id', id);
+  modalConfig = null;
+  await loadAll();
+}
+
+function kundenHTML() {
+  return `
+    <div class="card panel">
+      <div class="toolbar" style="justify-content:space-between;">
+        <h2 style="margin:0;">Kunden</h2>
+        <button class="btn primary" id="addKundeBtn">+ Neuer Kunde</button>
+      </div>
+      <div class="empty" style="text-align:left;padding:0 0 10px;">Stammdaten pro Kunde (Anschrift, VAT-ID, Ansprechpartner, Payment Terms) – wird bei Projekten und Kandidaten per Dropdown ausgewählt statt per Freitext.</div>
+      ${!data.kunden.length ? '<div class="empty">Noch keine Kunden angelegt.</div>' : `
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Name</th><th>Anschrift</th><th>VAT-ID</th><th>Ansprechpartner</th><th>E-Mail</th><th>Payment Terms</th><th>Aktionen</th></tr></thead>
+          <tbody>
+            ${data.kunden.map(k => `<tr>
+              <td>${k.name}</td>
+              <td>${[k.strasse, [k.plz, k.ort].filter(Boolean).join(' '), k.land].filter(Boolean).join(', ') || '–'}</td>
+              <td>${k.vat_id || '–'}</td>
+              <td>${k.ansprechpartner || '–'}</td>
+              <td>${k.email || '–'}</td>
+              <td>${k.payment_terms || '–'}</td>
+              <td>
+                <button class="link" data-edit-kunde="${k.id}">Bearbeiten</button>
+                <button class="link danger" data-del-kunde="${k.id}">Löschen</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`}
+    </div>
+  `;
+}
+
 function blankSubProject() {
   return {
     id: null, _tempId: 'new-' + Math.random().toString(36).slice(2),
@@ -1071,7 +1184,7 @@ function openCandidateModal(id) {
   modalConfig = {
     type: 'candidate', id: id || null,
     values: cd ? { ...cd } : {
-      org: activeOrg, contractor: '', freelancer_email: '', vat_id: '', kunde: '', invoice_email: '', status: 'Aktiv',
+      org: activeOrg, contractor: '', freelancer_email: '', vat_id: '', kunde: '', kunde_id: '', invoice_email: '', status: 'Aktiv',
       projekttyp: 'contract', rechnungsname: '', start_date: '', end_date: '', wochenstunden: 40,
       pay_h: 0, charge_h: 0, deal_value: '', amount_ordered_hours: '', consultant1_id: '', consultant2_id: '',
     },
@@ -1128,9 +1241,10 @@ function renderCandidateModal(c) {
       </div>
       <div class="field"><label>VAT-ID Freelancer</label><input type="text" id="cd_vat_id" value="${v.vat_id || ''}"></div>
       <div class="field-row">
-        <div class="field"><label>Kunde</label><input type="text" id="cd_kunde" value="${v.kunde || ''}"></div>
+        <div class="field"><label>Kunde</label><select id="cd_kunde">${kundeOptionsHTML(v.kunde_id)}</select></div>
         <div class="field"><label>Rechnungs-E-Mail Kunde</label><input type="text" id="cd_invoice_email" value="${v.invoice_email || ''}"></div>
       </div>
+      ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – oben im Tab "CRM" unter "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
       <div class="field">
         <label>CRM-Status</label>
         <select id="cd_status">
@@ -1209,12 +1323,15 @@ function renderCandidateModal(c) {
   document.getElementById('modalSaveCandidate').addEventListener('click', async () => {
     syncSubProjectsFromDOM(c);
     const isPermNow = document.getElementById('cd_art').value === 'perm';
+    const kundeIdVal = document.getElementById('cd_kunde').value || null;
+    if (!kundeIdVal) { alert('Bitte einen Kunden auswählen (im Tab "CRM" unter "Kunden" ggf. zuerst anlegen).'); return; }
     const payload = {
       org: c.id ? c.values.org : activeOrg,
       contractor: document.getElementById('cd_contractor').value.trim(),
       freelancer_email: document.getElementById('cd_freelancer_email').value.trim() || null,
       vat_id: document.getElementById('cd_vat_id').value.trim() || null,
-      kunde: document.getElementById('cd_kunde').value.trim(),
+      kunde_id: kundeIdVal,
+      kunde: kundeName(kundeIdVal),
       invoice_email: document.getElementById('cd_invoice_email').value.trim() || null,
       status: document.getElementById('cd_status').value,
       projekttyp: isPermNow ? 'perm' : 'contract',
@@ -1268,7 +1385,9 @@ async function generateProjectFromSubProject(c, sp) {
   if (sp.linked_project_id && !confirm('Für dieses Subprojekt wurde bereits ein Projekt erzeugt. Trotzdem ein weiteres, neues Projekt anlegen?')) return;
   const org = c.id ? c.values.org : activeOrg;
   const val = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
-  const kunde = val('cd_kunde') !== undefined ? val('cd_kunde').trim() : c.values.kunde;
+  const kundeId = (val('cd_kunde') !== undefined ? val('cd_kunde') : c.values.kunde_id) || null;
+  if (!kundeId) { alert('Bitte zuerst einen Kunden auswählen.'); return; }
+  const kunde = kundeName(kundeId);
   const contractor = val('cd_contractor') !== undefined ? val('cd_contractor').trim() : c.values.contractor;
   const projekttyp = val('cd_art') !== undefined ? val('cd_art') : c.values.projekttyp;
   const isPerm = projekttyp === 'perm';
@@ -1280,7 +1399,7 @@ async function generateProjectFromSubProject(c, sp) {
   const consultant1_id = (val('cd_consultant1') !== undefined ? val('cd_consultant1') : c.values.consultant1_id) || null;
   const consultant2_id = (val('cd_consultant2') !== undefined ? val('cd_consultant2') : c.values.consultant2_id) || null;
   const payload = {
-    org, projekttyp, kunde, contractor,
+    org, projekttyp, kunde_id: kundeId, kunde, contractor,
     rechnungsname, start_date, end_date,
     pay_h, charge_h, consultant1_id, consultant2_id,
     status: 'Auto',
@@ -1316,6 +1435,7 @@ async function generateProjectFromSubProject(c, sp) {
 
 function crmHTML() {
   return `
+    ${kundenHTML()}
     <div class="card panel">
       <h2>CRM – Kandidaten/Freelancer</h2>
       <div class="toolbar" style="margin-bottom:10px;">
@@ -1353,7 +1473,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }] = await Promise.all([
     sb.from('projects').select('*').order('created_at'),
     sb.from('entries').select('*'),
     sb.from('consultants').select('*').order('created_at'),
@@ -1374,6 +1494,8 @@ async function loadAll() {
     // und migration_crm_subprojekte.sql).
     sb.from('candidates').select('*').order('created_at', { ascending: false }),
     sb.from('candidate_projects').select('*').order('created_at', { ascending: false }),
+    // kunden (CRM-Stammdaten pro Kunde) ist ebenfalls optional (siehe migration_kunden.sql).
+    sb.from('kunden').select('*').order('name'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -1384,6 +1506,7 @@ async function loadAll() {
   if (e5) console.warn('team_memberships konnte nicht geladen werden (migration_team_bonus.sql ausgeführt?)', e5);
   if (e6 || e7 || e8 || e9) console.warn('Contractor-Timesheets konnten nicht geladen werden (migration_contractor_timesheets.sql ausgeführt?)', e6, e7, e8, e9);
   if (e10 || e11) console.warn('CRM-Kandidaten konnten nicht geladen werden (migration_crm.sql/migration_crm_subprojekte.sql ausgeführt?)', e10, e11);
+  if (e12) console.warn('Kunden-CRM konnte nicht geladen werden (migration_kunden.sql ausgeführt?)', e12);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
@@ -1396,6 +1519,7 @@ async function loadAll() {
   data.candidates = (candidates || []).filter(cd => cd.org === activeOrg);
   const candidateIds = new Set(data.candidates.map(cd => cd.id));
   data.candidateProjects = (candidateProjects || []).filter(cp => candidateIds.has(cp.candidate_id));
+  data.kunden = (kunden || []).filter(k => k.org === activeOrg);
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   data.ki_vorschlaege = kiVorschlaege || [];
   data.team_memberships = teamMemberships || [];
@@ -1447,6 +1571,7 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheet_days' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'candidate_projects' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kunden' }, () => loadAll())
     .subscribe();
 }
 
@@ -1596,6 +1721,7 @@ function render() {
   if (modalConfig && modalConfig.type === 'consultant') renderConsultantModal(modalConfig);
   if (modalConfig && modalConfig.type === 'contractor') renderContractorModal(modalConfig);
   if (modalConfig && modalConfig.type === 'candidate') renderCandidateModal(modalConfig);
+  if (modalConfig && modalConfig.type === 'kunde') renderKundeModal(modalConfig);
 }
 
 // ---------- DASHBOARD ----------
@@ -1916,7 +2042,7 @@ function openProjectModal(id) {
     // Neue Projekte gehören automatisch zur aktuell angezeigten Firma (activeOrg) - kein
     // eigenes Auswahlfeld dafür, damit hier nichts versehentlich der falschen Firma
     // zugeordnet werden kann. Bestehende Projekte behalten beim Bearbeiten ihre Firma.
-    values: p ? { ...p } : { org: activeOrg, projekttyp: 'contract', kunde: '', contractor: '', rechnungsname: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
+    values: p ? { ...p } : { org: activeOrg, projekttyp: 'contract', kunde: '', kunde_id: '', contractor: '', rechnungsname: '', start_date: '', end_date: '', wochenstunden: 40, pay_h: 0, charge_h: 0, status: 'Auto', consultant1_id: '', consultant2_id: '' },
   };
   render();
 }
@@ -1942,9 +2068,10 @@ function renderModal() {
         </select>
       </div>
       <div class="field-row">
-        <div class="field"><label>Kunde</label><input type="text" id="f_kunde" value="${v.kunde || ''}"></div>
+        <div class="field"><label>Kunde</label><select id="f_kunde">${kundeOptionsHTML(v.kunde_id)}</select></div>
         <div class="field"><label>Contractor</label><input type="text" id="f_contractor" value="${v.contractor || ''}"></div>
       </div>
+      ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – im Tab "CRM" unter "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
       <div class="field">
         <label>Projektname (optional)</label>
         <input type="text" id="f_projektname" value="${v.projektname || ''}" placeholder="z.B. bei mehreren Projekten für denselben Kunden">
@@ -2042,10 +2169,13 @@ function renderModal() {
     let endDate = document.getElementById('f_ende').value || null;
     if (isPerm && !endDate) endDate = startDate;
     const isPeaxModal = (c.id ? c.values.org : activeOrg) === 'peax';
+    const kundeIdVal = document.getElementById('f_kunde').value || null;
+    if (!kundeIdVal) { alert('Bitte einen Kunden auswählen (im Tab "CRM" unter "Kunden" ggf. zuerst anlegen).'); return; }
     const payload = {
       org: c.id ? c.values.org : activeOrg, // Firma steht fest, sobald das Projekt existiert
       projekttyp: isPerm ? 'perm' : 'contract',
-      kunde: document.getElementById('f_kunde').value.trim(),
+      kunde_id: kundeIdVal,
+      kunde: kundeName(kundeIdVal),
       contractor: document.getElementById('f_contractor').value.trim(),
       projektname: document.getElementById('f_projektname').value.trim() || null,
       rechnungsname: document.getElementById('f_rechnungsname').value.trim() || null,
@@ -2479,6 +2609,10 @@ function wireTabEvents() {
   if (addCandidateBtn) addCandidateBtn.addEventListener('click', () => openCandidateModal(null));
   document.querySelectorAll('[data-edit-candidate]').forEach(b => b.addEventListener('click', () => openCandidateModal(b.dataset.editCandidate)));
   document.querySelectorAll('[data-del-candidate]').forEach(b => b.addEventListener('click', () => deleteCandidate(b.dataset.delCandidate)));
+  const addKundeBtn = document.getElementById('addKundeBtn');
+  if (addKundeBtn) addKundeBtn.addEventListener('click', () => openKundeModal(null));
+  document.querySelectorAll('[data-edit-kunde]').forEach(b => b.addEventListener('click', () => openKundeModal(b.dataset.editKunde)));
+  document.querySelectorAll('[data-del-kunde]').forEach(b => b.addEventListener('click', () => deleteKunde(b.dataset.delKunde)));
 }
 
 // ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
