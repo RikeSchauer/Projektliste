@@ -127,6 +127,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <!-- Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js"></script>
+<!-- SheetJS (für den Kunden-Report als echte .xlsx-Datei) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
 <script>
 /* ============================================================
@@ -201,6 +203,8 @@ let entryFilterKunde = { soll: 'all', ist: 'all' };
 let entryFilterArt = { soll: 'all', ist: 'all' };
 let entryFilterStatus = { soll: 'all', ist: 'all' };
 let kiFilterStatus = 'pending'; // 'pending' | 'approved' | 'rejected' | 'all' – Filter im Tab "KI-Vorschläge"
+let reportKundeId = ''; // ausgewählter Kunde für den Excel-Report im Tab "Kunden"
+let reportMonth = currentMonthStr();
 
 function currentMonthStr() {
   const d = new Date();
@@ -1167,7 +1171,74 @@ function kundenHTML() {
         </table>
       </div>`}
     </div>
+
+    <div class="card panel">
+      <h2>Kunden-Report (Excel)</h2>
+      <div class="empty" style="text-align:left;padding:0 0 10px;">Erzeugt eine .xlsx-Datei mit allen Contractors/Projekten dieses Kunden für einen Monat - im Format des bisherigen TimesheetPortal-Exports (z.B. für Siemens). Eine Zeile pro CRM-Subprojekt, Stunden aus den freigegebenen Timesheets. Nur Kandidaten mit tatsächlich erfassten Stunden in diesem Monat erscheinen.</div>
+      <div class="toolbar-filters">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
+        <select id="reportKundeSel">
+          <option value="">– bitte wählen –</option>
+          ${data.kunden.map(k => `<option value="${k.id}" ${reportKundeId === k.id ? 'selected' : ''}>${k.name}</option>`).join('')}
+        </select>
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
+        <input type="month" id="reportMonthPicker" value="${reportMonth}">
+        <button class="btn primary" id="generateKundenReportBtn">Report generieren (.xlsx)</button>
+      </div>
+    </div>
   `;
+}
+
+// Summe der freigegebenen (approved) Timesheet-Stunden eines Projekts in einem bestimmten Monat -
+// Basis für die "Work quantity"-Spalte im Kunden-Report (siehe generateKundenReport).
+function approvedHoursForProjectMonth(projectId, month) {
+  const tsIds = new Set(data.timesheets.filter(t => t.project_id === projectId && t.month === month && t.status === 'approved').map(t => t.id));
+  if (!tsIds.size) return 0;
+  return data.timesheetDays.filter(d => tsIds.has(d.timesheet_id)).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+}
+
+// Baut eine Excel-Datei im Stil des bisherigen TimesheetPortal-Exports: eine Zeile pro
+// CRM-Subprojekt (candidate_projects) mit tatsächlich erfassten (freigegebenen) Stunden im
+// gewählten Monat. "Rate code"/"Rate description" entsprechen Projektnummer/Projektname des
+// Subprojekts, "Placement code/description" und "PO" kommen vom übergeordneten Kandidaten.
+function generateKundenReport() {
+  if (!reportKundeId) { alert('Bitte zuerst einen Kunden auswählen.'); return; }
+  if (typeof XLSX === 'undefined') { alert('Die Excel-Bibliothek konnte nicht geladen werden (CDN/Internetverbindung prüfen).'); return; }
+  const k = kunde(reportKundeId);
+  const candidatesOfKunde = data.candidates.filter(cd => cd.kunde_id === reportKundeId);
+  const rows = [];
+  candidatesOfKunde.forEach(cd => {
+    candidateProjectsOf(cd.id).filter(sp => sp.linked_project_id).forEach(sp => {
+      const hours = approvedHoursForProjectMonth(sp.linked_project_id, reportMonth);
+      if (!hours) return; // wie im Original-Report: nur Zeilen mit tatsächlich erfassten Stunden
+      const payRate = cd.pay_h || 0;
+      const chargeRate = cd.charge_h || 0;
+      const consultantNames = [cd.consultant1_id, cd.consultant2_id].filter(Boolean).map(consultantName).join(' / ');
+      rows.push({
+        'Placement code': cd.placement_code || '',
+        'Contractor name': cd.contractor || '',
+        'Client name': k ? k.name : '',
+        'Placement description': cd.placement_description || '',
+        'Work quantity': round1(hours),
+        'Rate code': sp.projekt_nummer || '',
+        'Rate description': sp.projekt_name || '',
+        'Units': 'Hours',
+        'Pay rate': payRate,
+        'Total pay': round1(hours * payRate),
+        'Charge rate': chargeRate,
+        'Total charge': round1(hours * chargeRate),
+        'Placement consultant': consultantNames,
+        'Placement PO': cd.po_reference || '',
+        'Placement: Purchase Order / Invoice Reference': cd.po_reference || '',
+      });
+    });
+  });
+  if (!rows.length) { alert('Keine freigegebenen Stunden für diesen Kunden/Monat gefunden.'); return; }
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Report');
+  const kundeSlug = (k ? k.name : 'Kunde').replace(/[^a-z0-9]+/gi, '_');
+  XLSX.writeFile(wb, `Report_${kundeSlug}_${reportMonth}.xlsx`);
 }
 
 function blankSubProject() {
@@ -1185,6 +1256,7 @@ function openCandidateModal(id) {
     type: 'candidate', id: id || null,
     values: cd ? { ...cd } : {
       org: activeOrg, contractor: '', freelancer_email: '', vat_id: '', kunde: '', kunde_id: '', invoice_email: '', status: 'Aktiv',
+      placement_code: '', placement_description: '', po_reference: '',
       projekttyp: 'contract', rechnungsname: '', start_date: '', end_date: '', wochenstunden: 40,
       pay_h: 0, charge_h: 0, deal_value: '', amount_ordered_hours: '', consultant1_id: '', consultant2_id: '',
     },
@@ -1245,6 +1317,12 @@ function renderCandidateModal(c) {
         <div class="field"><label>Rechnungs-E-Mail Kunde</label><input type="text" id="cd_invoice_email" value="${v.invoice_email || ''}"></div>
       </div>
       ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – oben im Tab "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
+      <div class="field-row">
+        <div class="field"><label>Placement Code</label><input type="text" id="cd_placement_code" value="${v.placement_code || ''}" placeholder="z.B. 1135-050-01"></div>
+        <div class="field"><label>Placement Description</label><input type="text" id="cd_placement_description" value="${v.placement_description || ''}" placeholder="z.B. SHS TE UX IXD"></div>
+      </div>
+      <div class="field"><label>PO / Referenznummer</label><input type="text" id="cd_po_reference" value="${v.po_reference || ''}" placeholder="z.B. 9709336944/584K"></div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Nur für den Kunden-Report (Excel-Export im Tab "Kunden") relevant - identisch zu den Feldern "Placement code/description" und "PO" im bisherigen TimesheetPortal-Export. Bei Bedarf leer lassen.</div>
       <div class="field">
         <label>CRM-Status</label>
         <select id="cd_status">
@@ -1333,6 +1411,9 @@ function renderCandidateModal(c) {
       kunde_id: kundeIdVal,
       kunde: kundeName(kundeIdVal),
       invoice_email: document.getElementById('cd_invoice_email').value.trim() || null,
+      placement_code: document.getElementById('cd_placement_code').value.trim() || null,
+      placement_description: document.getElementById('cd_placement_description').value.trim() || null,
+      po_reference: document.getElementById('cd_po_reference').value.trim() || null,
       status: document.getElementById('cd_status').value,
       projekttyp: isPermNow ? 'perm' : 'contract',
       rechnungsname: document.getElementById('cd_rechnungsname').value.trim() || null,
@@ -2614,6 +2695,12 @@ function wireTabEvents() {
   if (addKundeBtn) addKundeBtn.addEventListener('click', () => openKundeModal(null));
   document.querySelectorAll('[data-edit-kunde]').forEach(b => b.addEventListener('click', () => openKundeModal(b.dataset.editKunde)));
   document.querySelectorAll('[data-del-kunde]').forEach(b => b.addEventListener('click', () => deleteKunde(b.dataset.delKunde)));
+  const reportKundeSel = document.getElementById('reportKundeSel');
+  if (reportKundeSel) reportKundeSel.addEventListener('change', () => { reportKundeId = reportKundeSel.value; render(); });
+  const reportMonthPicker = document.getElementById('reportMonthPicker');
+  if (reportMonthPicker) reportMonthPicker.addEventListener('change', () => { reportMonth = reportMonthPicker.value; render(); });
+  const generateKundenReportBtn = document.getElementById('generateKundenReportBtn');
+  if (generateKundenReportBtn) generateKundenReportBtn.addEventListener('click', () => generateKundenReport());
 }
 
 // ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
