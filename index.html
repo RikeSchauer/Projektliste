@@ -211,6 +211,52 @@ function currentMonthStr() {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
+// Macht einen Wert sicher, bevor er in HTML eingesetzt wird. Ohne das kann ein
+// Text aus der Datenbank oder aus der URL die Seite umbauen: steht z.B. in einem
+// Kundennamen ein "<script>", würde der Browser das als echtes HTML ausführen
+// statt es anzuzeigen. Betrifft besonders Felder, die von außen befüllt werden -
+// Lieferantennamen aus Weclapp, Absendernamen aus dem Rechnungspostfach, und den
+// ?invite=-Parameter aus dem Einladungslink.
+//
+// Faustregel für neuen Code: alles, was aus der Datenbank oder aus der URL kommt
+// und in ein `...`-Template eingesetzt wird, gehört in esc(). Zahlen brauchen es
+// nicht (fmtEUR/fmtNum liefern schon sichere Zeichen), fest im Code stehende
+// Texte auch nicht. Im Zweifel esc() - doppelt escapen kann nicht passieren,
+// weil esc() den Wert immer nur einmal umwandelt.
+function esc(v) {
+  if (v === null || v === undefined) return '';
+  return String(v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Jeder Schreibvorgang gehört hier durch. Grund: Supabase wirft bei einem
+// fehlgeschlagenen insert/update/delete KEINE Exception, sondern liefert ein
+// Objekt mit .error zurück. Wird das nicht geprüft, läuft der Code stur weiter,
+// das Fenster schließt sich, die Liste lädt neu - und der Wert ist einfach nicht
+// da. Ein gescheitertes Speichern sah dadurch exakt aus wie ein erfolgreiches.
+//
+// Rückgabe: bei Erfolg die Daten (bei .select()) bzw. true, im Fehlerfall null.
+// Aufrufer, bei denen ein Weiterlaufen Schaden anrichten würde, prüfen deshalb
+// auf null und brechen ab.
+// quiet: true unterdrückt nur das Hinweisfenster (für Schleifen, die sonst
+// dutzendfach nacheinander melden würden) - der Aufrufer meldet dann gesammelt.
+async function save(query, was, quiet) {
+  const res = await query;
+  if (res && res.error) {
+    console.error('Speichern fehlgeschlagen:', was, res.error);
+    if (!quiet) {
+      alert(`"${was}" konnte nicht gespeichert werden.\n\n${res.error.message}\n\n`
+        + 'Die Änderung wurde NICHT übernommen. Bitte Seite neu laden und noch einmal versuchen.');
+    }
+    return null;
+  }
+  return (res && res.data !== null && res.data !== undefined) ? res.data : true;
+}
+
 function fmtEUR(n) { return (n || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }); }
 function fmtNum(n, digits) { return (n || 0).toLocaleString('de-DE', { maximumFractionDigits: digits ?? 1 }); }
 function fmtPct(n) { return ((n || 0) * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + '%'; }
@@ -330,18 +376,28 @@ async function syncAutoSoll(proj) {
   const monthSet = new Set(months);
   const existing = data.entries.filter(e => e.project_id === proj.id && e.kind === 'soll');
 
+  // Fehler werden gezählt und am Ende EINMAL gemeldet - hier laufen pro Projekt
+  // bis zu einem Dutzend Schreibvorgänge, ein Hinweisfenster je Monat wäre nicht
+  // wegklickbar.
+  let fehler = 0;
   for (const m of months) {
     const hours = projectMonthSollHours(proj, m);
     const ex = existing.find(e => e.month === m);
     if (!ex) {
-      await sb.from('entries').insert({ project_id: proj.id, kind: 'soll', month: m, stunden: hours, auto: true });
+      if (!await save(sb.from('entries').insert({ project_id: proj.id, kind: 'soll', month: m, stunden: hours, auto: true }), 'SOLL-Monat', true)) fehler++;
     } else if (ex.auto && Math.abs((ex.stunden || 0) - hours) > 0.05) {
-      await sb.from('entries').update({ stunden: hours }).eq('id', ex.id);
+      if (!await save(sb.from('entries').update({ stunden: hours }).eq('id', ex.id), 'SOLL-Monat', true)) fehler++;
     }
   }
   const stale = existing.filter(e => e.auto && !monthSet.has(e.month));
   for (const e of stale) {
-    await sb.from('entries').delete().eq('id', e.id);
+    if (!await save(sb.from('entries').delete().eq('id', e.id), 'SOLL-Monat entfernen', true)) fehler++;
+  }
+  if (fehler) {
+    alert(`Die automatische SOLL-Berechnung konnte ${fehler} Monat(e) nicht speichern`
+      + `${proj.kunde ? ' (Projekt: ' + proj.kunde + ')' : ''}.\n\n`
+      + 'Die SOLL-Stunden dieses Projekts sind dadurch unvollständig. Details stehen in der '
+      + 'Browser-Konsole. Bitte Seite neu laden und "SOLL neu berechnen" noch einmal ausführen.');
   }
   await loadAll();
 }
@@ -502,16 +558,16 @@ function consultantReportHTML() {
     return `
       <div class="card panel">
         ${actions}
-        <h2 style="margin-bottom:2px;">Commission Statement – ${c.name}</h2>
-        <div class="sub" style="margin-bottom:16px;">${monthLabelEN(provMonth)} · Rate ${fmtPct(c.rate)} on attributed actual gross profit</div>
+        <h2 style="margin-bottom:2px;">Commission Statement – ${esc(c.name)}</h2>
+        <div class="sub" style="margin-bottom:16px;">${esc(monthLabelEN(provMonth))} · Rate ${fmtPct(c.rate)} on attributed actual gross profit</div>
         ${!rows.length ? '<div class="empty">No projects/actual hours this month.</div>' : `
         <div class="table-scroll">
         <table>
           <thead><tr><th>Client</th><th>Freelancer</th><th>Share</th><th>Actual Hours</th><th>Gross Profit (100%)</th><th>Attributed Gross Profit</th></tr></thead>
           <tbody>
             ${rows.map(r => `<tr>
-              <td>${r.kunde}</td>
-              <td>${r.contractor}</td>
+              <td>${esc(r.kunde)}</td>
+              <td>${esc(r.contractor)}</td>
               <td>${fmtPct(r.share)}</td>
               <td>${fmtNum(r.stunden, 1)}</td>
               <td>${fmtEUR(r.rohertragVoll)}</td>
@@ -537,23 +593,23 @@ function consultantReportHTML() {
     const subtotal = rows.reduce((s, r) => s + r.rohertragAnteil, 0);
     teamTotal += subtotal;
     return `
-      <h3 style="font-size:13.5px;margin:16px 0 8px;">${m.name}</h3>
+      <h3 style="font-size:13.5px;margin:16px 0 8px;">${esc(m.name)}</h3>
       ${!rows.length ? '<div class="empty" style="padding:6px 0;">No projects/actual hours this period.</div>' : `
       <div class="table-scroll">
       <table>
         <thead><tr><th>Month</th><th>Client</th><th>Freelancer</th><th>Share</th><th>Actual Hours</th><th>Gross Profit (100%)</th><th>Attributed Gross Profit</th></tr></thead>
         <tbody>
           ${rows.map(r => `<tr>
-            <td>${monthLabelEN(r.month)}</td>
-            <td>${r.kunde}</td>
-            <td>${r.contractor}</td>
+            <td>${esc(monthLabelEN(r.month))}</td>
+            <td>${esc(r.kunde)}</td>
+            <td>${esc(r.contractor)}</td>
             <td>${fmtPct(r.share)}</td>
             <td>${fmtNum(r.stunden, 1)}</td>
             <td>${fmtEUR(r.rohertragVoll)}</td>
             <td>${fmtEUR(r.rohertragAnteil)}</td>
           </tr>`).join('')}
         </tbody>
-        <tfoot><tr style="font-weight:700;"><td colspan="6">Subtotal ${m.name}</td><td>${fmtEUR(subtotal)}</td></tr></tfoot>
+        <tfoot><tr style="font-weight:700;"><td colspan="6">Subtotal ${esc(m.name)}</td><td>${fmtEUR(subtotal)}</td></tr></tfoot>
       </table>
       </div>`}
     `;
@@ -563,14 +619,14 @@ function consultantReportHTML() {
   return `
     <div class="card panel">
       ${actions}
-      <h2 style="margin-bottom:2px;">Team Commission Statement – ${c.name}</h2>
+      <h2 style="margin-bottom:2px;">Team Commission Statement – ${esc(c.name)}</h2>
       <div class="sub" style="margin-bottom:16px;">${periodLabel} · Rate ${fmtPct(c.team_rate)} on the team's actual gross profit</div>
       ${!members.length ? '<div class="empty">No team members assigned.</div>' : memberBlocks}
       <div style="margin-top:18px;padding-top:14px;border-top:2px solid var(--border);font-weight:700;display:flex;justify-content:space-between;">
         <span>Total Team Gross Profit (${periodLabel})</span><span>${fmtEUR(teamTotal)}</span>
       </div>
       <div style="margin-top:6px;font-weight:700;display:flex;justify-content:space-between;color:var(--blue);">
-        <span>Commission to ${c.name} (${fmtPct(c.team_rate)})</span><span>${fmtEUR(commission)}</span>
+        <span>Commission to ${esc(c.name)} (${fmtPct(c.team_rate)})</span><span>${fmtEUR(commission)}</span>
       </div>
     </div>
   `;
@@ -602,7 +658,7 @@ function provisionenHTML() {
             const memberOfLeads = data.team_memberships.filter(tm => tm.member_id === c.id).map(tm => consultantName(tm.team_lead_id));
             return `
             <tr>
-              <td>${c.name}</td>
+              <td>${esc(c.name)}</td>
               <td>${fmtPct(c.rate)}</td>
               <td>${c.is_team_lead ? '<span class="badge Aktiv">Ja</span>' : '–'}</td>
               <td>${c.is_team_lead ? `${fmtPct(c.team_rate)} / ${c.team_rate_period === 'yearly' ? 'Jahr' : 'Quartal'}` : '–'}</td>
@@ -634,7 +690,7 @@ function provisionenHTML() {
             const rev = attributedRevenue(c.id, monthEntries);
             const commission = rev * (c.rate || 0);
             return `<tr>
-              <td><strong>${c.name}</strong></td>
+              <td><strong>${esc(c.name)}</strong></td>
               <td>${fmtEUR(rev)}</td>
               <td>${fmtPct(c.rate)}</td>
               <td>${fmtEUR(commission)}</td>
@@ -658,7 +714,7 @@ function provisionenHTML() {
             const revMonth = attributedRevenue(c.id, monthEntries);
             const memberOfLeads = data.team_memberships.filter(tm => tm.member_id === c.id).map(tm => consultantName(tm.team_lead_id));
             return `<tr>
-              <td><strong>${c.name}</strong>${c.is_team_lead ? ' <span class="badge Aktiv">Team-Lead</span>' : ''}</td>
+              <td><strong>${esc(c.name)}</strong>${c.is_team_lead ? ' <span class="badge Aktiv">Team-Lead</span>' : ''}</td>
               <td>${memberOfLeads.length ? memberOfLeads.join(', ') : '–'}</td>
               <td>${fmtEUR(revMonth)}</td>
             </tr>`;
@@ -683,7 +739,7 @@ function provisionenHTML() {
             const teamRev = members.reduce((sum, m) => sum + attributedRevenue(m.id, periodEntries), 0);
             const commission = teamRev * (lead.team_rate || 0);
             return `<tr>
-              <td><strong>${lead.name}</strong></td>
+              <td><strong>${esc(lead.name)}</strong></td>
               <td>${periodLabel}</td>
               <td>${members.length ? members.map(m => m.name).join(', ') : '<span class="empty" style="padding:0;">keine Mitglieder zugewiesen</span>'}</td>
               <td>${fmtEUR(teamRev)}</td>
@@ -722,7 +778,7 @@ function renderConsultantModal(c) {
   overlay.innerHTML = `
     <div class="modal">
       <h3>${c.id ? 'Consultant bearbeiten' : 'Neuer Consultant'}</h3>
-      <div class="field"><label>Name</label><input type="text" id="cf_name" value="${v.name || ''}"></div>
+      <div class="field"><label>Name</label><input type="text" id="cf_name" value="${esc(v.name || '')}"></div>
       <div class="field-row">
         <div class="field"><label>Provisionssatz (monatlich, individuell)</label><input type="number" step="0.01" id="cf_rate" value="${v.rate}"></div>
         <div class="field"><label>Ist Team-Lead?</label>
@@ -747,7 +803,7 @@ function renderConsultantModal(c) {
           <div style="display:flex;flex-wrap:wrap;gap:10px;border:1px solid var(--border);border-radius:8px;padding:10px;">
             ${otherConsultants.length ? otherConsultants.map(x => `
               <label style="display:flex;align-items:center;gap:5px;font-size:13px;font-weight:400;margin:0;">
-                <input type="checkbox" class="cf_team_member" value="${x.id}" ${currentMemberIds.has(x.id) ? 'checked' : ''}> ${x.name}
+                <input type="checkbox" class="cf_team_member" value="${x.id}" ${currentMemberIds.has(x.id) ? 'checked' : ''}> ${esc(x.name)}
               </label>`).join('') : '<span class="empty" style="padding:0;">keine anderen Consultants vorhanden</span>'}
           </div>
           <div class="empty" style="text-align:left;padding:6px 0 0;">Eine Person kann gleichzeitig bei mehreren Team-Leads als Mitglied angehakt sein - ihr Rohertrag zählt dann unabhängig bei jedem Bonus mit.</div>
@@ -781,10 +837,11 @@ function renderConsultantModal(c) {
     const checkedMemberIds = Array.from(document.querySelectorAll('.cf_team_member:checked')).map(el => el.value);
     let consultantId = c.id;
     if (c.id) {
-      await sb.from('consultants').update(payload).eq('id', c.id);
+      if (!await save(sb.from('consultants').update(payload).eq('id', c.id), 'Consultant')) return;
     } else {
-      const { data: inserted } = await sb.from('consultants').insert(payload).select().single();
-      consultantId = inserted ? inserted.id : null;
+      const inserted = await save(sb.from('consultants').insert(payload).select().single(), 'Consultant');
+      if (!inserted) return; // ohne angelegten Consultant ergeben die Team-Zuordnungen unten keinen Sinn
+      consultantId = inserted.id;
     }
     // Team-Mitgliedschaften abgleichen (nur relevant, falls dieser Consultant Team-Lead ist) -
     // bestehende entfernen, die nicht mehr angehakt sind, neue hinzufügen. Falls die Migration
@@ -795,8 +852,14 @@ function renderConsultantModal(c) {
       const existingIds = new Set((existing || []).map(tm => tm.member_id));
       const toRemove = (existing || []).filter(tm => !checkedMemberIds.includes(tm.member_id));
       const toAdd = checkedMemberIds.filter(id => !existingIds.has(id));
-      for (const tm of toRemove) await sb.from('team_memberships').delete().eq('id', tm.id);
-      for (const memberId of toAdd) await sb.from('team_memberships').insert({ team_lead_id: consultantId, member_id: memberId });
+      let fehler = 0;
+      for (const tm of toRemove) if (!await save(sb.from('team_memberships').delete().eq('id', tm.id), 'Team-Zuordnung', true)) fehler++;
+      for (const memberId of toAdd) if (!await save(sb.from('team_memberships').insert({ team_lead_id: consultantId, member_id: memberId }), 'Team-Zuordnung', true)) fehler++;
+      if (fehler) {
+        alert(`Der Consultant wurde gespeichert, aber ${fehler} Team-Zuordnung(en) nicht.\n\n`
+          + 'Falls die Migration 08_migration_team_bonus.sql noch nicht ausgeführt wurde, ist das '
+          + 'erwartbar. Sonst stehen Details in der Browser-Konsole.');
+      }
     }
     modalConfig = null;
     await loadAll();
@@ -805,7 +868,7 @@ function renderConsultantModal(c) {
 
 async function deleteConsultant(id) {
   if (!confirm('Consultant löschen? Zuweisungen an Projekten werden dabei entfernt (nicht die Projekte selbst).')) return;
-  await sb.from('consultants').delete().eq('id', id);
+  if (!await save(sb.from('consultants').delete().eq('id', id), 'Consultant löschen')) return;
   modalConfig = null;
   await loadAll();
 }
@@ -875,8 +938,8 @@ function renderContractorModal(c) {
   overlay.innerHTML = `
     <div class="modal">
       <h3>${c.id ? 'Contractor bearbeiten' : 'Neuer Contractor'}</h3>
-      <div class="field"><label>Name</label><input type="text" id="ctf_name" value="${v.name || ''}"></div>
-      <div class="field"><label>E-Mail (für den Timesheet-Login)</label><input type="text" id="ctf_email" value="${v.email || ''}" placeholder="freelancer@beispiel.com"></div>
+      <div class="field"><label>Name</label><input type="text" id="ctf_name" value="${esc(v.name || '')}"></div>
+      <div class="field"><label>E-Mail (für den Timesheet-Login)</label><input type="text" id="ctf_email" value="${esc(v.email || '')}" placeholder="freelancer@beispiel.com"></div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Sobald hier eine E-Mail hinterlegt ist, kann sich die Person auf der normalen Login-Seite mit "Registrieren" selbst einen Zugang anlegen (mit genau dieser E-Mail) und sieht danach nur ihr eigenes Timesheet.</div>
       <div class="field">
         <label>Kunde / Subprojekte aus dem CRM (worauf dieser Contractor Stunden buchen darf)</label>
@@ -891,7 +954,7 @@ function renderContractorModal(c) {
             <div>
               <div data-toggle-kunde="${kid}" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:5px 2px;font-weight:600;font-size:13px;">
                 <span style="display:inline-block;width:14px;">${expanded ? '▾' : '▸'}</span>
-                <span>${kundeName(kid)}</span>
+                <span>${esc(kundeName(kid))}</span>
                 ${checkedCount ? `<span class="mini-badge manuell">${checkedCount}</span>` : ''}
                 ${isSuggested ? `<span class="mini-badge auto">Vorschlag</span>` : ''}
               </div>
@@ -899,10 +962,10 @@ function renderContractorModal(c) {
               <div style="padding-left:26px;display:flex;flex-direction:column;gap:4px;margin-bottom:4px;">
                 ${itemsOfKunde.map(({ sp, cd }) => sp.linked_project_id ? `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
-                    <input type="checkbox" class="ctf_project" value="${sp.linked_project_id}" ${c.pickerChecked.has(sp.linked_project_id) ? 'checked' : ''}> ${sp.projekt_name || cd.contractor}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''}
+                    <input type="checkbox" class="ctf_project" value="${sp.linked_project_id}" ${c.pickerChecked.has(sp.linked_project_id) ? 'checked' : ''}> ${esc(sp.projekt_name || cd.contractor)}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''}
                   </label>` : `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;color:var(--muted);" title="Im CRM erst auf 'Projekt erzeugen' klicken, bevor darauf gebucht werden kann">
-                    <input type="checkbox" disabled> ${sp.projekt_name || cd.contractor}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''} (noch kein Projekt erzeugt)
+                    <input type="checkbox" disabled> ${esc(sp.projekt_name || cd.contractor)}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''} (noch kein Projekt erzeugt)
                   </label>`).join('')}
               </div>` : ''}
             </div>`;
@@ -950,14 +1013,21 @@ function renderContractorModal(c) {
       email: document.getElementById('ctf_email').value.trim() || null,
     };
     let contractorId = c.id;
-    if (contractorId) await sb.from('contractors').update(payload).eq('id', contractorId);
-    else { const { data: inserted } = await sb.from('contractors').insert(payload).select().single(); contractorId = inserted && inserted.id; }
+    if (contractorId) {
+      if (!await save(sb.from('contractors').update(payload).eq('id', contractorId), 'Contractor')) return;
+    } else {
+      const inserted = await save(sb.from('contractors').insert(payload).select().single(), 'Contractor');
+      if (!inserted) return; // ohne angelegten Contractor ergeben die Projektzuordnungen unten keinen Sinn
+      contractorId = inserted.id;
+    }
     if (contractorId) {
       const checkedIds = Array.from(c.pickerChecked);
       const toRemove = Array.from(assignedIds).filter(id => !c.pickerChecked.has(id));
       const toAdd = checkedIds.filter(id => !assignedIds.has(id));
-      for (const projectId of toRemove) await sb.from('contractor_projects').delete().eq('contractor_id', contractorId).eq('project_id', projectId);
-      for (const projectId of toAdd) await sb.from('contractor_projects').insert({ contractor_id: contractorId, project_id: projectId });
+      let fehler = 0;
+      for (const projectId of toRemove) if (!await save(sb.from('contractor_projects').delete().eq('contractor_id', contractorId).eq('project_id', projectId), 'Projektzuordnung', true)) fehler++;
+      for (const projectId of toAdd) if (!await save(sb.from('contractor_projects').insert({ contractor_id: contractorId, project_id: projectId }), 'Projektzuordnung', true)) fehler++;
+      if (fehler) alert(`Der Contractor wurde gespeichert, aber ${fehler} Projektzuordnung(en) nicht. Details in der Browser-Konsole.`);
     }
     modalConfig = null;
     await loadAll();
@@ -966,7 +1036,7 @@ function renderContractorModal(c) {
 
 async function deleteContractor(id) {
   if (!confirm('Contractor löschen? Verknüpfte Projekte verlieren dabei den Timesheet-Zugang (die Projekte selbst bleiben erhalten).')) return;
-  await sb.from('contractors').delete().eq('id', id);
+  if (!await save(sb.from('contractors').delete().eq('id', id), 'Contractor löschen')) return;
   modalConfig = null;
   await loadAll();
 }
@@ -1002,8 +1072,8 @@ function timesheetsHTML() {
           <thead><tr><th>Name</th><th>E-Mail (Login)</th><th>Verknüpfte Projekte</th><th>Aktionen</th></tr></thead>
           <tbody>
             ${data.contractors.map(c => `<tr>
-              <td>${c.name}</td>
-              <td>${c.email || '<span class="empty" style="padding:0;">kein Login hinterlegt</span>'}</td>
+              <td>${esc(c.name)}</td>
+              <td>${esc(c.email) || '<span class="empty" style="padding:0;">kein Login hinterlegt</span>'}</td>
               <td>${data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => { const p = project(cp.project_id); return p ? p.kunde : null; }).filter(Boolean).join(', ') || '–'}</td>
               <td>
                 ${c.email ? `<button class="link" data-copy-invite="${c.id}">Link kopieren</button> ` : ''}
@@ -1035,9 +1105,9 @@ function timesheetsHTML() {
             ${list.map(t => {
               const p = project(t.project_id);
               return `<tr>
-                <td>${contractorName(t.contractor_id)}</td><td>${p ? (p.projektname ? p.kunde + ' – ' + p.projektname : p.kunde) : '–'}</td><td>${monthLabel(t.month)}</td>
+                <td>${esc(contractorName(t.contractor_id))}</td><td>${esc(p ? (p.projektname ? p.kunde + ' – ' + p.projektname : p.kunde) : '–')}</td><td>${monthLabel(t.month)}</td>
                 <td>${fmtNum(totalOf(t.id), 1)}</td>
-                <td><span class="mini-badge ${t.status === 'approved' ? 'auto' : (t.status === 'rejected' ? '' : 'manuell')}">${TS_STATUS_LABEL[t.status]}</span>${t.status === 'rejected' && t.review_note ? ` <span style="color:var(--muted);font-size:11px;">(${t.review_note})</span>` : ''}</td>
+                <td><span class="mini-badge ${t.status === 'approved' ? 'auto' : (t.status === 'rejected' ? '' : 'manuell')}">${TS_STATUS_LABEL[t.status]}</span>${t.status === 'rejected' && t.review_note ? ` <span style="color:var(--muted);font-size:11px;">(${esc(t.review_note)})</span>` : ''}</td>
                 <td>${t.status === 'submitted' ? `<button class="link" data-approve-ts="${t.id}">Freigeben</button> <button class="link danger" data-reject-ts="${t.id}">Ablehnen</button>` : '–'}</td>
               </tr>`;
             }).join('')}
@@ -1078,7 +1148,7 @@ function kundeName(id) { const k = kunde(id); return k ? k.name : '–'; }
 function kundeOptionsHTML(selectedId) {
   const sorted = [...data.kunden].sort((a, b) => a.name.localeCompare(b.name));
   return '<option value="">– bitte wählen –</option>' +
-    sorted.map(k => `<option value="${k.id}" ${selectedId === k.id ? 'selected' : ''}>${k.name}</option>`).join('');
+    sorted.map(k => `<option value="${k.id}" ${selectedId === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('');
 }
 
 function openKundeModal(id) {
@@ -1097,19 +1167,19 @@ function renderKundeModal(c) {
   overlay.innerHTML = `
     <div class="modal">
       <h3>${c.id ? 'Kunde bearbeiten' : 'Neuer Kunde'}</h3>
-      <div class="field"><label>Name (Firma)</label><input type="text" id="kf_name" value="${v.name || ''}"></div>
-      <div class="field"><label>Straße</label><input type="text" id="kf_strasse" value="${v.strasse || ''}"></div>
+      <div class="field"><label>Name (Firma)</label><input type="text" id="kf_name" value="${esc(v.name || '')}"></div>
+      <div class="field"><label>Straße</label><input type="text" id="kf_strasse" value="${esc(v.strasse || '')}"></div>
       <div class="field-row">
-        <div class="field"><label>PLZ</label><input type="text" id="kf_plz" value="${v.plz || ''}"></div>
-        <div class="field"><label>Ort</label><input type="text" id="kf_ort" value="${v.ort || ''}"></div>
+        <div class="field"><label>PLZ</label><input type="text" id="kf_plz" value="${esc(v.plz || '')}"></div>
+        <div class="field"><label>Ort</label><input type="text" id="kf_ort" value="${esc(v.ort || '')}"></div>
       </div>
-      <div class="field"><label>Land</label><input type="text" id="kf_land" value="${v.land || ''}"></div>
-      <div class="field"><label>VAT-ID</label><input type="text" id="kf_vat_id" value="${v.vat_id || ''}"></div>
+      <div class="field"><label>Land</label><input type="text" id="kf_land" value="${esc(v.land || '')}"></div>
+      <div class="field"><label>VAT-ID</label><input type="text" id="kf_vat_id" value="${esc(v.vat_id || '')}"></div>
       <div class="field-row">
-        <div class="field"><label>E-Mail</label><input type="text" id="kf_email" value="${v.email || ''}"></div>
-        <div class="field"><label>Ansprechpartner</label><input type="text" id="kf_ansprechpartner" value="${v.ansprechpartner || ''}"></div>
+        <div class="field"><label>E-Mail</label><input type="text" id="kf_email" value="${esc(v.email || '')}"></div>
+        <div class="field"><label>Ansprechpartner</label><input type="text" id="kf_ansprechpartner" value="${esc(v.ansprechpartner || '')}"></div>
       </div>
-      <div class="field"><label>Payment Terms</label><input type="text" id="kf_payment_terms" value="${v.payment_terms || ''}" placeholder="z.B. 30 Tage netto"></div>
+      <div class="field"><label>Payment Terms</label><input type="text" id="kf_payment_terms" value="${esc(v.payment_terms || '')}" placeholder="z.B. 30 Tage netto"></div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDeleteKunde">Löschen</button>' : ''}
         <button class="btn" id="modalCancelKunde">Abbrechen</button>
@@ -1134,8 +1204,11 @@ function renderKundeModal(c) {
       payment_terms: document.getElementById('kf_payment_terms').value.trim() || null,
     };
     if (!payload.name) { alert('Bitte einen Namen für den Kunden eintragen.'); return; }
-    if (c.id) await sb.from('kunden').update(payload).eq('id', c.id);
-    else await sb.from('kunden').insert(payload);
+    if (c.id) {
+      if (!await save(sb.from('kunden').update(payload).eq('id', c.id), 'Kunde')) return;
+    } else {
+      if (!await save(sb.from('kunden').insert(payload), 'Kunde')) return;
+    }
     modalConfig = null;
     await loadAll();
   });
@@ -1143,7 +1216,7 @@ function renderKundeModal(c) {
 
 async function deleteKunde(id) {
   if (!confirm('Kunden löschen? Projekte/Kandidaten, die auf diesen Kunden verweisen, verlieren dabei nur die Verknüpfung (der bisherige Kundenname bleibt als Text stehen).')) return;
-  await sb.from('kunden').delete().eq('id', id);
+  if (!await save(sb.from('kunden').delete().eq('id', id), 'Kunde löschen')) return;
   modalConfig = null;
   await loadAll();
 }
@@ -1162,12 +1235,12 @@ function kundenHTML() {
           <thead><tr><th>Name</th><th>Anschrift</th><th>VAT-ID</th><th>Ansprechpartner</th><th>E-Mail</th><th>Payment Terms</th><th>Aktionen</th></tr></thead>
           <tbody>
             ${data.kunden.map(k => `<tr>
-              <td>${k.name}</td>
+              <td>${esc(k.name)}</td>
               <td>${[k.strasse, [k.plz, k.ort].filter(Boolean).join(' '), k.land].filter(Boolean).join(', ') || '–'}</td>
-              <td>${k.vat_id || '–'}</td>
-              <td>${k.ansprechpartner || '–'}</td>
-              <td>${k.email || '–'}</td>
-              <td>${k.payment_terms || '–'}</td>
+              <td>${esc(k.vat_id || '–')}</td>
+              <td>${esc(k.ansprechpartner || '–')}</td>
+              <td>${esc(k.email || '–')}</td>
+              <td>${esc(k.payment_terms || '–')}</td>
               <td>
                 <button class="link" data-edit-kunde="${k.id}">Bearbeiten</button>
                 <button class="link danger" data-del-kunde="${k.id}">Löschen</button>
@@ -1185,7 +1258,7 @@ function kundenHTML() {
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
         <select id="reportKundeSel">
           <option value="">– bitte wählen –</option>
-          ${data.kunden.map(k => `<option value="${k.id}" ${reportKundeId === k.id ? 'selected' : ''}>${k.name}</option>`).join('')}
+          ${data.kunden.map(k => `<option value="${k.id}" ${reportKundeId === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
         </select>
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
         <input type="month" id="reportMonthPicker" value="${reportMonth}">
@@ -1339,7 +1412,7 @@ async function uploadPlacementPO(placementId, file) {
   const path = `${activeOrg}/${placementId}/${Date.now()}_${file.name}`;
   const { error } = await sb.storage.from('placement-pos').upload(path, file, { upsert: true });
   if (error) { alert('Upload fehlgeschlagen: ' + error.message); return; }
-  await sb.from('placements').update({ po_pdf_path: path, po_pdf_filename: file.name }).eq('id', placementId);
+  if (!await save(sb.from('placements').update({ po_pdf_path: path, po_pdf_filename: file.name }).eq('id', placementId), 'PO-Datei verknüpfen')) return;
   await loadAll();
 }
 
@@ -1370,8 +1443,8 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
         </div>
       </div>
       <div class="field-row">
-        <div class="field"><label>Projektname</label><input type="text" id="pl_name_${k}" value="${pl.projekt_name || ''}"></div>
-        <div class="field"><label>Projektnummer</label><input type="text" id="pl_nummer_${k}" value="${pl.projekt_nummer || ''}"></div>
+        <div class="field"><label>Projektname</label><input type="text" id="pl_name_${k}" value="${esc(pl.projekt_name || '')}"></div>
+        <div class="field"><label>Projektnummer</label><input type="text" id="pl_nummer_${k}" value="${esc(pl.projekt_nummer || '')}"></div>
       </div>
       <div class="field-row">
         <div class="field">
@@ -1406,7 +1479,7 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
         <div class="field"><label>Pay${rateLabel} (Kosten)</label><input type="number" id="pl_payrate_${k}" value="${pl.pay_rate}"></div>
         <div class="field"><label>Charge${rateLabel} (Umsatz)</label><input type="number" id="pl_chargerate_${k}" value="${pl.charge_rate}"></div>
       </div>
-      <div class="field"><label>Rechnungsname/Firma (optional)</label><input type="text" id="pl_rechnungsname_${k}" value="${pl.rechnungsname || ''}"></div>
+      <div class="field"><label>Rechnungsname/Firma (optional)</label><input type="text" id="pl_rechnungsname_${k}" value="${esc(pl.rechnungsname || '')}"></div>
       <div class="field-row">
         <div class="field"><label>Consultant 1</label><select id="pl_consultant1_${k}">${consultantOptionsHTML(pl.consultant1_id)}</select></div>
         <div class="field"><label>Consultant 2 (optional)</label><select id="pl_consultant2_${k}">${consultantOptionsHTML(pl.consultant2_id)}</select></div>
@@ -1414,38 +1487,38 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
       <button class="link" data-toggle-advanced="${k}" style="margin-bottom:8px;">${advanced ? '▾' : '▸'} Erweitert: PO, Zahlungsziel, Kunde/Kontakt-Overrides, Abrechnungsstand</button>
       ${advanced ? `
       <div class="field-row">
-        <div class="field"><label>Placement Code</label><input type="text" id="pl_code_${k}" value="${pl.placement_code || ''}" placeholder="z.B. 1135-050-01"></div>
-        <div class="field"><label>Placement Description</label><input type="text" id="pl_description_${k}" value="${pl.placement_description || ''}" placeholder="z.B. SHS TE UX IXD"></div>
+        <div class="field"><label>Placement Code</label><input type="text" id="pl_code_${k}" value="${esc(pl.placement_code || '')}" placeholder="z.B. 1135-050-01"></div>
+        <div class="field"><label>Placement Description</label><input type="text" id="pl_description_${k}" value="${esc(pl.placement_description || '')}" placeholder="z.B. SHS TE UX IXD"></div>
       </div>
       <div class="field">
         <label>Zahlungsziel / Sonderregelungen</label>
-        <input type="text" id="pl_paymentterms_${k}" value="${pl.payment_terms || ''}" placeholder="${kundeObj && kundeObj.payment_terms ? 'Standard laut Kunde: ' + kundeObj.payment_terms : 'z.B. 30 Tage netto, 2% Skonto bei Zahlung binnen 10 Tagen'}">
+        <input type="text" id="pl_paymentterms_${k}" value="${esc(pl.payment_terms || '')}" placeholder="${kundeObj && kundeObj.payment_terms ? 'Standard laut Kunde: ' + kundeObj.payment_terms : 'z.B. 30 Tage netto, 2% Skonto bei Zahlung binnen 10 Tagen'}">
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Leer lassen = Standard-Zahlungsziel des Kunden gilt (${kundeObj && kundeObj.payment_terms ? kundeObj.payment_terms : 'beim Kunden noch nicht hinterlegt'}). Hier eintragen, um für dieses Placement abzuweichen.</div>
+      <div class="empty" style="text-align:left;padding:0 0 8px;">Leer lassen = Standard-Zahlungsziel des Kunden gilt (${esc(kundeObj && kundeObj.payment_terms ? kundeObj.payment_terms : 'beim Kunden noch nicht hinterlegt')}). Hier eintragen, um für dieses Placement abzuweichen.</div>
       <h4 style="font-size:12.5px;margin:10px 0 6px;color:var(--muted);text-transform:uppercase;">PO (Purchase Order)</h4>
       <div class="field-row">
-        <div class="field"><label>PO-Empfänger (an wen wird gestellt)</label><input type="text" id="pl_poempfaenger_${k}" value="${pl.po_empfaenger || ''}"></div>
+        <div class="field"><label>PO-Empfänger (an wen wird gestellt)</label><input type="text" id="pl_poempfaenger_${k}" value="${esc(pl.po_empfaenger || '')}"></div>
         <div class="field"><label>PO-Betrag (€)</label><input type="number" id="pl_pobetrag_${k}" value="${pl.po_betrag ?? ''}"></div>
       </div>
       <div class="field-row">
         <div class="field"><label>Stunden gesamt laut PO</label><input type="number" step="0.5" id="pl_postunden_${k}" value="${pl.po_stunden_gesamt ?? ''}"></div>
-        <div class="field"><label>PO-Referenz</label><input type="text" id="pl_poreferenz_${k}" value="${pl.po_referenz || ''}" placeholder="z.B. 9709336944/584K"></div>
+        <div class="field"><label>PO-Referenz</label><input type="text" id="pl_poreferenz_${k}" value="${esc(pl.po_referenz || '')}" placeholder="z.B. 9709336944/584K"></div>
       </div>
       <div class="field">
         <label>PO als PDF</label>
-        ${pl.po_pdf_path ? `<div style="margin-bottom:6px;"><button class="link" data-view-po="${pl.po_pdf_path}">${pl.po_pdf_filename || 'PDF ansehen'}</button></div>` : '<div class="empty" style="padding:0 0 6px;text-align:left;">Noch keine PO hinterlegt.</div>'}
+        ${pl.po_pdf_path ? `<div style="margin-bottom:6px;"><button class="link" data-view-po="${esc(pl.po_pdf_path)}">${esc(pl.po_pdf_filename || 'PDF ansehen')}</button></div>` : '<div class="empty" style="padding:0 0 6px;text-align:left;">Noch keine PO hinterlegt.</div>'}
         <input type="file" id="pl_pofile_${k}" accept="application/pdf">
       </div>
       <h4 style="font-size:12.5px;margin:10px 0 6px;color:var(--muted);text-transform:uppercase;">Kunde/Kontakt – Override (leer = Standard aus Stammdaten)</h4>
       <div class="field-row">
-        <div class="field"><label>Kunde: Name</label><input type="text" id="pl_kov_name_${k}" value="${pl.kunde_override_name || ''}" placeholder="${kundeObj ? kundeObj.name : ''}"></div>
-        <div class="field"><label>Kunde: E-Mail</label><input type="text" id="pl_kov_email_${k}" value="${pl.kunde_override_email || ''}" placeholder="${kundeObj && kundeObj.email ? kundeObj.email : ''}"></div>
+        <div class="field"><label>Kunde: Name</label><input type="text" id="pl_kov_name_${k}" value="${esc(pl.kunde_override_name || '')}" placeholder="${esc(kundeObj ? kundeObj.name : '')}"></div>
+        <div class="field"><label>Kunde: E-Mail</label><input type="text" id="pl_kov_email_${k}" value="${esc(pl.kunde_override_email || '')}" placeholder="${esc(kundeObj && kundeObj.email ? kundeObj.email : '')}"></div>
       </div>
       <div class="field-row">
-        <div class="field"><label>Kunde: USt-ID</label><input type="text" id="pl_kov_vat_${k}" value="${pl.kunde_override_vat_id || ''}" placeholder="${kundeObj && kundeObj.vat_id ? kundeObj.vat_id : ''}"></div>
-        <div class="field"><label>Contractor: Rechnungs-/Mail-Adresse</label><input type="text" id="pl_civemail_${k}" value="${pl.contractor_invoice_email || ''}"></div>
+        <div class="field"><label>Kunde: USt-ID</label><input type="text" id="pl_kov_vat_${k}" value="${esc(pl.kunde_override_vat_id || '')}" placeholder="${esc(kundeObj && kundeObj.vat_id ? kundeObj.vat_id : '')}"></div>
+        <div class="field"><label>Contractor: Rechnungs-/Mail-Adresse</label><input type="text" id="pl_civemail_${k}" value="${esc(pl.contractor_invoice_email || '')}"></div>
       </div>
-      <div class="field"><label>Kunde: Rechnungsadresse</label><input type="text" id="pl_kov_adresse_${k}" value="${pl.kunde_override_adresse || ''}" placeholder="${kundeObj ? [kundeObj.strasse, [kundeObj.plz, kundeObj.ort].filter(Boolean).join(' '), kundeObj.land].filter(Boolean).join(', ') : ''}"></div>
+      <div class="field"><label>Kunde: Rechnungsadresse</label><input type="text" id="pl_kov_adresse_${k}" value="${esc(pl.kunde_override_adresse || '')}" placeholder="${kundeObj ? [kundeObj.strasse, [kundeObj.plz, kundeObj.ort].filter(Boolean).join(' '), kundeObj.land].filter(Boolean).join(', ') : ''}"></div>
       <h4 style="font-size:12.5px;margin:10px 0 6px;color:var(--muted);text-transform:uppercase;">Abrechnungsstand</h4>
       <div class="empty" style="text-align:left;padding:0 0 4px;">Abgerechnet: <strong>${fmtNum(abgerechnet, 1)} Std.</strong>${poStunden != null ? ` von ${fmtNum(poStunden, 1)} Std. laut PO (Rest: ${fmtNum(rest, 1)} Std.)` : ' (keine PO-Gesamtstundenzahl hinterlegt)'} · Abgerechnetes Volumen: <strong>${fmtEUR(volumen)}</strong></div>
       ${linkedTimesheets.length ? `
@@ -1474,10 +1547,10 @@ function renderCandidateModal(c) {
     <div class="modal" style="width:600px;">
       <h3>${c.id ? 'Kandidat bearbeiten' : 'Neuer Kandidat'}</h3>
       <div class="field-row">
-        <div class="field"><label>Freelancer/Kandidat</label><input type="text" id="cd_contractor" value="${v.contractor || ''}"></div>
-        <div class="field"><label>E-Mail Freelancer</label><input type="text" id="cd_freelancer_email" value="${v.freelancer_email || ''}"></div>
+        <div class="field"><label>Freelancer/Kandidat</label><input type="text" id="cd_contractor" value="${esc(v.contractor || '')}"></div>
+        <div class="field"><label>E-Mail Freelancer</label><input type="text" id="cd_freelancer_email" value="${esc(v.freelancer_email || '')}"></div>
       </div>
-      <div class="field"><label>VAT-ID Freelancer</label><input type="text" id="cd_vat_id" value="${v.vat_id || ''}"></div>
+      <div class="field"><label>VAT-ID Freelancer</label><input type="text" id="cd_vat_id" value="${esc(v.vat_id || '')}"></div>
       <div class="field-row">
         <div class="field"><label>Kunde</label><select id="cd_kunde">${kundeOptionsHTML(v.kunde_id)}</select></div>
         <div class="field"><label>CRM-Status</label>
@@ -1559,12 +1632,21 @@ function renderCandidateModal(c) {
       status: document.getElementById('cd_status').value,
     };
     let candidateId = c.id;
-    if (candidateId) await sb.from('candidates').update(payload).eq('id', candidateId);
-    else { const { data: inserted } = await sb.from('candidates').insert(payload).select().single(); candidateId = inserted && inserted.id; }
+    if (candidateId) {
+      if (!await save(sb.from('candidates').update(payload).eq('id', candidateId), 'Kandidat')) return;
+    } else {
+      const inserted = await save(sb.from('candidates').insert(payload).select().single(), 'Kandidat');
+      if (!inserted) return; // ohne Kandidat kein Platz für die Placements darunter
+      candidateId = inserted.id;
+    }
     if (candidateId) {
       const existingIds = new Set(c.id ? placementsOf(c.id).map(pl => pl.id) : []);
       const keptIds = new Set(c.placements.filter(pl => pl.id).map(pl => pl.id));
-      for (const oldId of existingIds) { if (!keptIds.has(oldId)) await sb.from('placements').delete().eq('id', oldId); }
+      // Beim Löschen wird abgebrochen statt weiterzumachen: sonst sind die
+      // entfernten Placements teils weg und der Rest inkonsistent gespeichert.
+      for (const oldId of existingIds) {
+        if (!keptIds.has(oldId) && !await save(sb.from('placements').delete().eq('id', oldId), 'Placement entfernen')) return;
+      }
       for (const pl of c.placements) {
         const plPayload = {
           candidate_id: candidateId, projekt_name: pl.projekt_name || null, projekt_nummer: pl.projekt_nummer || null,
@@ -1578,8 +1660,13 @@ function renderCandidateModal(c) {
           kunde_override_vat_id: pl.kunde_override_vat_id, kunde_override_adresse: pl.kunde_override_adresse,
           contractor_invoice_email: pl.contractor_invoice_email,
         };
-        if (pl.id) await sb.from('placements').update(plPayload).eq('id', pl.id);
-        else { const { data: plInserted } = await sb.from('placements').insert(plPayload).select().single(); if (plInserted) pl.id = plInserted.id; }
+        if (pl.id) {
+          if (!await save(sb.from('placements').update(plPayload).eq('id', pl.id), 'Placement')) return;
+        } else {
+          const plInserted = await save(sb.from('placements').insert(plPayload).select().single(), 'Placement');
+          if (!plInserted) return;
+          pl.id = plInserted.id;
+        }
       }
     }
     modalConfig = null;
@@ -1589,7 +1676,7 @@ function renderCandidateModal(c) {
 
 async function deleteCandidate(id) {
   if (!confirm('Kandidat inkl. aller Placements aus dem CRM löschen? Bereits daraus erzeugte Projekte bleiben davon unberührt.')) return;
-  await sb.from('candidates').delete().eq('id', id);
+  if (!await save(sb.from('candidates').delete().eq('id', id), 'Kandidat löschen')) return;
   modalConfig = null;
   await loadAll();
 }
@@ -1619,11 +1706,13 @@ async function generateProjectFromPlacement(c, pl) {
   pl.linked_project_id = inserted.id;
   pl.status = 'Projekt erzeugt';
   if (pl.id) {
-    await sb.from('placements').update({ linked_project_id: inserted.id, status: 'Projekt erzeugt' }).eq('id', pl.id);
+    // Schlägt das fehl, existiert das Projekt bereits, das Placement weiß aber
+    // nichts davon - deshalb hier explizit melden statt still weiterzulaufen.
+    await save(sb.from('placements').update({ linked_project_id: inserted.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt');
   } else {
     // Placement existiert noch nicht in der DB (neu angelegt, noch nicht gespeichert) - gleich
     // mit anlegen, damit die Verknüpfung nicht beim nächsten Speichern verloren geht.
-    const { data: plInserted } = await sb.from('placements').insert({
+    const plInserted = await save(sb.from('placements').insert({
       candidate_id: c.id, projekt_name: pl.projekt_name || null, projekt_nummer: pl.projekt_nummer || null,
       rate_unit: pl.rate_unit, projekttyp: pl.projekttyp, rechnungsname: pl.rechnungsname,
       start_date: pl.start_date, end_date: pl.end_date, wochenstunden: pl.wochenstunden,
@@ -1635,7 +1724,7 @@ async function generateProjectFromPlacement(c, pl) {
       kunde_override_vat_id: pl.kunde_override_vat_id, kunde_override_adresse: pl.kunde_override_adresse,
       contractor_invoice_email: pl.contractor_invoice_email,
       linked_project_id: inserted.id, status: 'Projekt erzeugt',
-    }).select().single();
+    }).select().single(), 'Placement anlegen');
     if (plInserted) pl.id = plInserted.id;
   }
   await loadAll();
@@ -1671,14 +1760,14 @@ function placementsHTML() {
           <thead><tr><th>Kunde</th><th>Kandidat</th><th>Projekt</th><th>Pay</th><th>Charge</th><th>Marge</th><th>Consultants</th><th>Zahlungsziel</th><th>Abgerechnet</th><th>PO-Std.</th><th>Rest</th><th>Volumen</th><th>Status</th><th>Aktionen</th></tr></thead>
           <tbody>
             ${rows.map(r => `<tr>
-              <td>${r.kd ? `<button class="link" data-view-kunde-pl="${r.kd.id}">${r.kd.name}</button>` : '–'}</td>
-              <td><button class="link" data-view-candidate-pl="${r.cd.id}">${r.cd.contractor}</button></td>
-              <td>${r.pl.projekt_name || '(ohne Namen)'}${r.pl.projekt_nummer ? ' #' + r.pl.projekt_nummer : ''}</td>
+              <td>${r.kd ? `<button class="link" data-view-kunde-pl="${r.kd.id}">${esc(r.kd.name)}</button>` : '–'}</td>
+              <td><button class="link" data-view-candidate-pl="${r.cd.id}">${esc(r.cd.contractor)}</button></td>
+              <td>${esc(r.pl.projekt_name || '(ohne Namen)')}${r.pl.projekt_nummer ? ' #' + r.pl.projekt_nummer : ''}</td>
               <td>${fmtNum(r.pl.pay_rate, 2)}${r.unitLabel}</td>
               <td>${fmtNum(r.pl.charge_rate, 2)}${r.unitLabel}</td>
               <td>${fmtNum(r.marge, 2)}</td>
-              <td>${r.consultantNames}</td>
-              <td>${r.terms}</td>
+              <td>${esc(r.consultantNames)}</td>
+              <td>${esc(r.terms)}</td>
               <td>${fmtNum(r.abgerechnet, 1)}</td>
               <td>${r.pl.po_stunden_gesamt != null ? fmtNum(r.pl.po_stunden_gesamt, 1) : '–'}</td>
               <td>${r.rest != null ? fmtNum(r.rest, 1) : '–'}</td>
@@ -1708,9 +1797,9 @@ function crmHTML() {
             ${data.candidates.map(cd => {
               const pls = placementsOf(cd.id);
               return `<tr>
-              <td>${cd.contractor}</td><td>${cd.kunde}</td>
-              <td>${pls.length ? pls.map(pl => `${pl.projekt_name || '(ohne Namen)'}${pl.projekt_nummer ? ' #' + pl.projekt_nummer : ''} <span class="mini-badge ${pl.linked_project_id ? 'auto' : 'manuell'}">${pl.linked_project_id ? 'erzeugt' : 'Entwurf'}</span>`).join('<br>') : '<span class="empty" style="padding:0;">keine</span>'}</td>
-              <td>${cd.status}</td>
+              <td>${esc(cd.contractor)}</td><td>${esc(cd.kunde)}</td>
+              <td>${pls.length ? pls.map(pl => `${esc(pl.projekt_name || '(ohne Namen)')}${pl.projekt_nummer ? ' #' + pl.projekt_nummer : ''} <span class="mini-badge ${pl.linked_project_id ? 'auto' : 'manuell'}">${pl.linked_project_id ? 'erzeugt' : 'Entwurf'}</span>`).join('<br>') : '<span class="empty" style="padding:0;">keine</span>'}</td>
+              <td>${esc(cd.status)}</td>
               <td>
                 <button class="link" data-edit-candidate="${cd.id}">Bearbeiten</button>
                 <button class="link danger" data-del-candidate="${cd.id}">Löschen</button>
@@ -1727,34 +1816,68 @@ function crmHTML() {
 
 // ---------- DATA LOADING ----------
 
+// Supabase liefert pro Anfrage höchstens so viele Zeilen zurück, wie in den
+// Projekteinstellungen unter API -> "Max rows" stehen (Standard: 1000) - und zwar
+// STILL, ohne Fehler und ohne Hinweis. Ein einfaches select('*') hätte also ab der
+// 1001. Zeile einfach Daten weggelassen: fehlende Stunden in Reports und in der
+// Provisionsabrechnung, ohne dass es irgendwo auffällt.
+//
+// Deshalb wird hier seitenweise geladen, bis eine Seite nicht mehr voll ist. Bei
+// den aktuellen Datenmengen ist das eine einzige Anfrage pro Tabelle - es kostet
+// also nichts und wächst automatisch mit.
+const PAGE_SIZE = 1000;
+
+async function loadTable(name, orderCol, ascending) {
+  let from = 0;
+  const alle = [];
+  for (;;) {
+    let q = sb.from(name).select('*');
+    if (orderCol) q = q.order(orderCol, { ascending: ascending !== false });
+    // id als zweites Sortierkriterium: ohne eindeutige Reihenfolge könnten bei
+    // gleichem created_at/month zwischen zwei Seiten Zeilen doppelt oder gar
+    // nicht geliefert werden.
+    q = q.order('id', { ascending: true }).range(from, from + PAGE_SIZE - 1);
+    const { data, error } = await q;
+    if (error) return { data: null, error };
+    alle.push(...(data || []));
+    if (!data || data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+    if (from >= 200000) { // Notbremse gegen eine Endlosschleife
+      console.warn(`${name}: mehr als 200.000 Zeilen - Rest wird nicht geladen.`);
+      break;
+    }
+  }
+  return { data: alle, error: null };
+}
+
 async function loadAll() {
   // allProjects/allConsultants kommen ungefiltert (RLS liefert automatisch nur die Firmen,
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
   const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }] = await Promise.all([
-    sb.from('projects').select('*').order('created_at'),
-    sb.from('entries').select('*'),
-    sb.from('consultants').select('*').order('created_at'),
+    loadTable('projects', 'created_at'),
+    loadTable('entries'),
+    loadTable('consultants', 'created_at'),
     // ki_vorschlaege ist optional – falls die Tabelle (noch) nicht existiert (Migration nicht ausgeführt),
     // soll die App trotzdem normal weiterlaufen, nur der Tab "KI-Vorschläge" bleibt dann leer.
-    sb.from('ki_vorschlaege').select('*').order('created_at', { ascending: false }),
+    loadTable('ki_vorschlaege', 'created_at', false),
     // team_memberships ist ebenfalls optional (siehe migration_team_bonus.sql) - ohne die Migration
     // bleiben Team-Boni einfach leer, statt die App zum Absturz zu bringen.
-    sb.from('team_memberships').select('*'),
+    loadTable('team_memberships'),
     // contractors/contractor_projects/timesheets/timesheet_days sind ebenfalls optional (siehe
     // migration_contractor_timesheets.sql) - ohne die Migration bleibt der Tab "Timesheets"
     // einfach leer, statt die App zum Absturz zu bringen.
-    sb.from('contractors').select('*').order('name'),
-    sb.from('contractor_projects').select('*'),
-    sb.from('timesheets').select('*').order('month', { ascending: false }),
-    sb.from('timesheet_days').select('*'),
+    loadTable('contractors', 'name'),
+    loadTable('contractor_projects'),
+    loadTable('timesheets', 'month', false),
+    loadTable('timesheet_days'),
     // candidates/placements (CRM) sind ebenfalls optional (siehe migration_crm.sql,
     // migration_crm_subprojekte.sql und migration_placements.sql).
-    sb.from('candidates').select('*').order('created_at', { ascending: false }),
-    sb.from('placements').select('*').order('created_at', { ascending: false }),
+    loadTable('candidates', 'created_at', false),
+    loadTable('placements', 'created_at', false),
     // kunden (CRM-Stammdaten pro Kunde) ist ebenfalls optional (siehe migration_kunden.sql).
-    sb.from('kunden').select('*').order('name'),
+    loadTable('kunden', 'name'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -1809,7 +1932,7 @@ function renderNoAccess() {
     <div class="auth-wrap">
       <h1>Projektliste</h1>
       <div class="banner error">
-        Für <strong>${session.user.email}</strong> ist noch kein Zugriff auf KH oder peax hinterlegt.
+        Für <strong>${esc(session.user.email)}</strong> ist noch kein Zugriff auf KH oder peax hinterlegt.
         Bitte bei Rike melden, damit ein Eintrag in der Tabelle "user_access" ergänzt wird.
       </div>
       <button class="btn" id="noAccessLogout" style="width:100%;">Abmelden</button>
@@ -1890,10 +2013,10 @@ function renderAuth() {
           <button class="btn ${authMode === 'login' ? 'primary' : ''}" id="tabLogin">Anmelden</button>
           <button class="btn ${authMode === 'signup' ? 'primary' : ''}" id="tabSignup">Registrieren</button>
         </div>
-        ${authError ? `<div class="banner error">${authError}</div>` : ''}
-        ${authInfo ? `<div class="banner info">${authInfo}</div>` : ''}
-        ${inviteEmail && authMode === 'signup' ? `<div class="banner info">Persönlicher Einladungslink für <strong>${inviteEmail}</strong> – einfach ein Passwort wählen und Konto erstellen.</div>` : ''}
-        <div class="field"><label>E-Mail</label><input type="email" id="authEmail" value="${inviteEmail && authMode === 'signup' ? inviteEmail : ''}"></div>
+        ${authError ? `<div class="banner error">${esc(authError)}</div>` : ''}
+        ${authInfo ? `<div class="banner info">${esc(authInfo)}</div>` : ''}
+        ${inviteEmail && authMode === 'signup' ? `<div class="banner info">Persönlicher Einladungslink für <strong>${esc(inviteEmail)}</strong> – einfach ein Passwort wählen und Konto erstellen.</div>` : ''}
+        <div class="field"><label>E-Mail</label><input type="email" id="authEmail" value="${esc(inviteEmail && authMode === 'signup' ? inviteEmail : '')}"></div>
         <div class="field"><label>Passwort</label><input type="password" id="authPassword"></div>
         <button class="btn primary" id="authSubmit" style="width:100%;" ${authBusy ? 'disabled' : ''}>
           ${authBusy ? '…' : (authMode === 'login' ? 'Anmelden' : 'Konto erstellen')}
@@ -1915,7 +2038,7 @@ function renderError(msg) {
   document.getElementById('app').innerHTML = `
     <div class="auth-wrap">
       <div class="banner error">
-        Verbindung zur Datenbank fehlgeschlagen: ${msg}<br><br>
+        Verbindung zur Datenbank fehlgeschlagen: ${esc(msg)}<br><br>
         Prüfe, ob SUPABASE_URL und SUPABASE_ANON_KEY am Anfang der index.html korrekt eingetragen sind
         und ob das SQL-Setup (schema.sql) im Supabase-Projekt ausgeführt wurde.
       </div>
@@ -1943,7 +2066,7 @@ function render() {
           <div class="toolbar" style="margin:0;">
             ${allowedOrgs.map(o => `<button class="btn ${o === activeOrg ? 'primary' : ''}" data-org-switch="${o}">${ORG_LABELS[o] || o}</button>`).join('')}
           </div>` : ''}
-        <span>${session.user.email}</span>
+        <span>${esc(session.user.email)}</span>
         <button class="btn" id="logoutBtn">Abmelden</button>
       </div>
     </header>
@@ -2275,13 +2398,13 @@ function projekteHTML() {
             return `
             <tr>
               <td><span class="badge ${isPerm ? 'Perm' : 'Contract'}">${isPerm ? 'Perm' : 'Contract'}</span></td>
-              <td>${p.kunde}</td><td>${p.contractor}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
+              <td>${esc(p.kunde)}</td><td>${esc(p.contractor)}</td><td>${fmtDate(p.start_date)}</td><td>${fmtDate(p.end_date)}</td>
               ${isPeax
                 ? `<td>${p.deal_value != null ? fmtEUR(p.deal_value) : '–'}</td><td>${p.amount_ordered_hours != null ? fmtNum(p.amount_ordered_hours, 1) + ' Std.' : '–'}</td><td>${left != null ? fmtNum(left, 1) + ' Std.' : '–'}</td>`
                 : `<td>${isPerm ? '–' : p.wochenstunden}</td><td>${isPerm ? '1 Std. (Pauschale)' : fmtNum(projectTotalSollHours(p), 1) + ' Std.'}</td>`}
               <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
               <td>${fmtEUR(margeH(p))}</td><td>${fmtPct(margePct(p))}</td>
-              <td>${[p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' + ') || '–'}</td>
+              <td>${esc([p.consultant1_id, p.consultant2_id].filter(Boolean).map(consultantName).join(' + ') || '–')}</td>
               <td><span class="badge ${statusBadgeClass(st)}">${st}</span></td>
               <td><button class="link" data-edit="${p.id}">Bearbeiten</button> <button class="link danger" data-del="${p.id}">Löschen</button></td>
             </tr>`;
@@ -2312,7 +2435,7 @@ function openProjectModal(id) {
 
 function consultantOptionsHTML(selectedId) {
   return '<option value="">– keiner –</option>' +
-    data.consultants.map(c => `<option value="${c.id}" ${selectedId === c.id ? 'selected' : ''}>${c.name}</option>`).join('');
+    data.consultants.map(c => `<option value="${c.id}" ${selectedId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 }
 
 function renderModal() {
@@ -2332,17 +2455,17 @@ function renderModal() {
       </div>
       <div class="field-row">
         <div class="field"><label>Kunde</label><select id="f_kunde">${kundeOptionsHTML(v.kunde_id)}</select></div>
-        <div class="field"><label>Contractor</label><input type="text" id="f_contractor" value="${v.contractor || ''}"></div>
+        <div class="field"><label>Contractor</label><input type="text" id="f_contractor" value="${esc(v.contractor || '')}"></div>
       </div>
       ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – im Tab "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
       <div class="field">
         <label>Projektname (optional)</label>
-        <input type="text" id="f_projektname" value="${v.projektname || ''}" placeholder="z.B. bei mehreren Projekten für denselben Kunden">
+        <input type="text" id="f_projektname" value="${esc(v.projektname || '')}" placeholder="z.B. bei mehreren Projekten für denselben Kunden">
       </div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Nur zur besseren Unterscheidung, falls ein Kunde mehrere Projekte gleichzeitig hat (z.B. im Tab "Timesheets"). Leer lassen, wenn nicht relevant - dann wird stattdessen einfach der Contractor-Name zur Unterscheidung angezeigt.</div>
       <div class="field">
         <label>Rechnungsname/Firma (optional)</label>
-        <input type="text" id="f_rechnungsname" value="${v.rechnungsname || ''}" placeholder="nur falls abweichend vom Contractor-Namen">
+        <input type="text" id="f_rechnungsname" value="${esc(v.rechnungsname || '')}" placeholder="nur falls abweichend vom Contractor-Namen">
       </div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Falls dieser Freelancer über eine eigene Firma abrechnet (z.B. "Muniq Design GmbH" statt Personenname), hier den Firmennamen eintragen, wie er in Weclapp als Lieferant steht - wird beim automatischen Rechnungs-Abgleich zusätzlich zum Contractor-Namen geprüft.</div>
       <div class="field-row">
@@ -2390,7 +2513,7 @@ function renderModal() {
         <div style="display:flex;flex-direction:column;gap:6px;border:1px solid var(--border);border-radius:8px;padding:10px;max-height:160px;overflow:auto;">
           ${data.contractors.length ? data.contractors.map(ct => `
             <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
-              <input type="checkbox" class="f_contractor_project" value="${ct.id}" ${c.id && data.contractorProjects.some(cp => cp.contractor_id === ct.id && cp.project_id === c.id) ? 'checked' : ''}> ${ct.name}${ct.email ? '' : ' (kein Login hinterlegt)'}
+              <input type="checkbox" class="f_contractor_project" value="${ct.id}" ${c.id && data.contractorProjects.some(cp => cp.contractor_id === ct.id && cp.project_id === c.id) ? 'checked' : ''}> ${esc(ct.name)}${ct.email ? '' : ' (kein Login hinterlegt)'}
             </label>`).join('') : '<span class="empty" style="padding:0;">noch keine Contractors angelegt (Tab "Timesheets")</span>'}
         </div>
       </div>
@@ -2459,12 +2582,11 @@ function renderModal() {
     }
     let proj = null;
     if (c.id) {
-      const { data: updated } = await sb.from('projects').update(payload).eq('id', c.id).select().single();
-      proj = updated;
+      proj = await save(sb.from('projects').update(payload).eq('id', c.id).select().single(), 'Projekt');
     } else {
-      const { data: inserted } = await sb.from('projects').insert(payload).select().single();
-      proj = inserted;
+      proj = await save(sb.from('projects').insert(payload).select().single(), 'Projekt');
     }
+    if (!proj) return; // Modal offen lassen, damit die Eingaben nicht verloren gehen
     if (proj) {
       // Contractor-Zugang (n:m, siehe contractor_projects) - Mehrfachauswahl, da z.B. bei
       // Siemens mehrere Contractors am selben Projekt arbeiten.
@@ -2472,8 +2594,10 @@ function renderModal() {
       const existingIds = new Set(c.id ? data.contractorProjects.filter(cp => cp.project_id === c.id).map(cp => cp.contractor_id) : []);
       const toRemove = Array.from(existingIds).filter(id => !checkedIds.includes(id));
       const toAdd = checkedIds.filter(id => !existingIds.has(id));
-      for (const contractorId of toRemove) await sb.from('contractor_projects').delete().eq('project_id', proj.id).eq('contractor_id', contractorId);
-      for (const contractorId of toAdd) await sb.from('contractor_projects').insert({ project_id: proj.id, contractor_id: contractorId });
+      let fehler = 0;
+      for (const contractorId of toRemove) if (!await save(sb.from('contractor_projects').delete().eq('project_id', proj.id).eq('contractor_id', contractorId), 'Contractor-Zuordnung', true)) fehler++;
+      for (const contractorId of toAdd) if (!await save(sb.from('contractor_projects').insert({ project_id: proj.id, contractor_id: contractorId }), 'Contractor-Zuordnung', true)) fehler++;
+      if (fehler) alert(`Das Projekt wurde gespeichert, aber ${fehler} Contractor-Zuordnung(en) nicht. Details in der Browser-Konsole.`);
     }
     modalConfig = null;
     await loadAll();
@@ -2485,7 +2609,7 @@ function renderModal() {
 
 async function deleteProject(id) {
   if (!confirm('Projekt inkl. aller SOLL/IST-Einträge löschen?')) return;
-  await sb.from('projects').delete().eq('id', id);
+  if (!await save(sb.from('projects').delete().eq('id', id), 'Projekt löschen')) return;
   modalConfig = null;
   await loadAll();
 }
@@ -2609,7 +2733,7 @@ function monthEntryHTML(kind) {
         <tbody>
           ${rows.map(({ p, editable, stunden, c, badge }) => `
               <tr class="${editable ? '' : 'inactive'}">
-                <td>${p.kunde}</td><td>${p.contractor}</td>
+                <td>${esc(p.kunde)}</td><td>${esc(p.contractor)}</td>
                 <td>${fmtEUR(p.pay_h)}</td><td>${fmtEUR(p.charge_h)}</td>
                 <td><input class="num-cell" type="number" min="0" step="1" data-kind="${kind}" data-pid="${p.id}" value="${stunden}" ${editable ? '' : 'disabled placeholder="–"'}>${badge}</td>
                 <td>${fmtEUR(c.umsatz)}</td><td>${fmtEUR(c.kosten)}</td><td>${fmtEUR(c.rohertrag)}</td>
@@ -2632,7 +2756,7 @@ function monthEntryHTML(kind) {
 async function setEntry(kind, projectId, monthVal, stunden) {
   const existing = data.entries.find(e => e.project_id === projectId && e.kind === kind && e.month === monthVal);
   if (stunden === '' || stunden === null || isNaN(stunden)) {
-    if (existing) await sb.from('entries').delete().eq('id', existing.id);
+    if (existing && !await save(sb.from('entries').delete().eq('id', existing.id), 'Stundenwert löschen')) return;
     if (kind === 'soll') {
       const proj = project(projectId);
       if (proj) { await syncAutoSoll(proj); return; }
@@ -2640,11 +2764,11 @@ async function setEntry(kind, projectId, monthVal, stunden) {
   } else if (existing) {
     const patch = { stunden };
     if (kind === 'soll') patch.auto = false; // manuelle Änderung überschreibt die Automatik
-    await sb.from('entries').update(patch).eq('id', existing.id);
+    if (!await save(sb.from('entries').update(patch).eq('id', existing.id), 'Stundenwert')) return;
   } else {
     const payload = { project_id: projectId, kind, month: monthVal, stunden };
     if (kind === 'soll') payload.auto = false;
-    await sb.from('entries').insert(payload);
+    if (!await save(sb.from('entries').insert(payload), 'Stundenwert')) return;
   }
   await loadAll();
 }
@@ -2660,7 +2784,10 @@ async function setEntry(kind, projectId, monthVal, stunden) {
 // tatsächliche Rechnung danebenlegen kann. source_ref ist die Weclapp-purchaseInvoice-ID.
 function weclappInvoiceUrl(v) {
   if (v.source !== 'weclapp' || !v.source_ref) return null;
-  return `${WECLAPP_WEB_URL}/app/purchase-invoice/${v.source_ref}`;
+  // encodeURIComponent, weil source_ref aus Weclapp kommt und hier in eine URL
+  // eingebaut wird - sonst könnte ein Sonderzeichen darin das Ziel des Links
+  // verändern. esc() kommt zusätzlich beim Einsetzen ins href-Attribut dazu.
+  return `${WECLAPP_WEB_URL}/app/purchase-invoice/${encodeURIComponent(v.source_ref)}`;
 }
 
 function kiVorschlaegeHTML() {
@@ -2701,16 +2828,16 @@ function kiVorschlaegeHTML() {
             const invoiceUrl = weclappInvoiceUrl(v);
             return `
             <tr>
-              <td>${v.rechnungsnummer || '–'}${invoiceUrl ? ` <a href="${invoiceUrl}" target="_blank" rel="noopener" title="Original-Rechnung in Weclapp öffnen" style="text-decoration:none;">📄</a>` : ''}</td>
-              <td>${v.contractor_raw || '–'}</td>
+              <td>${esc(v.rechnungsnummer || '–')}${invoiceUrl ? ` <a href="${esc(invoiceUrl)}" target="_blank" rel="noopener" title="Original-Rechnung in Weclapp öffnen" style="text-decoration:none;">📄</a>` : ''}</td>
+              <td>${esc(v.contractor_raw || '–')}</td>
               <td>${isPending
-                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.allProjects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>[${ORG_LABELS[p.org] || p.org}] ${p.contractor} – ${p.kunde}</option>`).join('')}</select>`
+                ? `<select data-vid="${v.id}" data-field="project"><option value="">– bitte wählen –</option>${data.allProjects.map(p => `<option value="${p.id}" ${v.project_id === p.id ? 'selected' : ''}>[${ORG_LABELS[p.org] || p.org}] ${esc(p.contractor)} – ${esc(p.kunde)}</option>`).join('')}</select>`
                 : (matched ? `[${ORG_LABELS[matched.org] || matched.org}] ${matched.kunde} – ${matched.contractor}` : '<span class="empty" style="padding:0;">kein Projekt</span>')}</td>
-              <td>${isPending ? `<input type="month" data-vid="${v.id}" data-field="month" value="${v.month || ''}">` : (v.month ? monthLabel(v.month) : '–')}</td>
+              <td>${isPending ? `<input type="month" data-vid="${v.id}" data-field="month" value="${esc(v.month || '')}">` : (v.month ? monthLabel(v.month) : '–')}</td>
               <td>${isPending ? `<input class="num-cell" type="number" step="0.5" min="0" data-vid="${v.id}" data-field="stunden" value="${v.stunden ?? ''}">` : fmtNum(v.stunden, 1)}</td>
-              <td>${v.methode ? `<span class="mini-badge ${['extrahiert', 'rechnungstext'].includes(v.methode) ? 'auto' : 'manuell'}">${v.methode}</span>` : '–'}</td>
+              <td>${v.methode ? `<span class="mini-badge ${['extrahiert', 'rechnungstext'].includes(v.methode) ? 'auto' : 'manuell'}">${esc(v.methode)}</span>` : '–'}</td>
               <td>${v.betrag != null ? fmtEUR(v.betrag) : '–'}</td>
-              <td style="white-space:normal;max-width:220px;">${v.notiz ? `<span class="empty" style="padding:0;text-align:left;display:block;">${v.notiz}</span>` : ''}</td>
+              <td style="white-space:normal;max-width:220px;">${v.notiz ? `<span class="empty" style="padding:0;text-align:left;display:block;">${esc(v.notiz)}</span>` : ''}</td>
               <td><span class="badge ${v.status === 'approved' ? 'Aktiv' : v.status === 'rejected' ? 'Kritisch' : 'Achtung'}">${v.status === 'approved' ? 'Übernommen' : v.status === 'rejected' ? 'Abgelehnt' : 'Offen'}</span></td>
               <td>${isPending
                 ? `<button class="link" data-approve-ki="${v.id}">Übernehmen</button> <button class="link danger" data-reject-ki="${v.id}">Ablehnen</button>`
@@ -2737,17 +2864,17 @@ async function approveKiVorschlag(id) {
     return;
   }
   await setEntry('ist', projectId, monthVal, stunden);
-  await sb.from('ki_vorschlaege').update({ status: 'approved', project_id: projectId, month: monthVal, stunden, reviewed_at: new Date().toISOString() }).eq('id', id);
+  if (!await save(sb.from('ki_vorschlaege').update({ status: 'approved', project_id: projectId, month: monthVal, stunden, reviewed_at: new Date().toISOString() }).eq('id', id), 'Vorschlag übernehmen')) return;
   await loadAll();
 }
 
 async function rejectKiVorschlag(id) {
-  await sb.from('ki_vorschlaege').update({ status: 'rejected', reviewed_at: new Date().toISOString() }).eq('id', id);
+  if (!await save(sb.from('ki_vorschlaege').update({ status: 'rejected', reviewed_at: new Date().toISOString() }).eq('id', id), 'Vorschlag ablehnen')) return;
   await loadAll();
 }
 
 async function resetKiVorschlag(id) {
-  await sb.from('ki_vorschlaege').update({ status: 'pending', reviewed_at: null }).eq('id', id);
+  if (!await save(sb.from('ki_vorschlaege').update({ status: 'pending', reviewed_at: null }).eq('id', id), 'Vorschlag zurücksetzen')) return;
   await loadAll();
 }
 
@@ -2939,7 +3066,7 @@ function renderContractorPortal() {
           : `<div class="kh-wordmark">KONZEPT<br>HAUS</div>`}
         <div>
           <h1>Mein Timesheet</h1>
-          <div class="sub">${contractorProfile ? contractorProfile.name : ''} – ${session.user.email}</div>
+          <div class="sub">${esc(contractorProfile ? contractorProfile.name : '')} – ${esc(session.user.email)}</div>
         </div>
       </div>
       <div class="userbar"><button class="btn" id="logoutBtn">Abmelden</button></div>
@@ -2949,14 +3076,14 @@ function renderContractorPortal() {
       <div class="toolbar-filters" style="margin-bottom:16px;">
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Projekt / Kunde:</label>
         <select id="tsProjectSel">
-          ${contractorProjects.map(p => `<option value="${p.project_id}" ${p.project_id === contractorProjectId ? 'selected' : ''}>${p.projektname ? p.kunde + ' – ' + p.projektname : p.kunde}</option>`).join('')}
+          ${contractorProjects.map(p => `<option value="${p.project_id}" ${p.project_id === contractorProjectId ? 'selected' : ''}>${esc(p.projektname ? p.kunde + ' – ' + p.projektname : p.kunde)}</option>`).join('')}
         </select>
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
         <input type="month" id="tsMonthInput" value="${contractorMonth}">
       </div>
       <div style="margin-bottom:14px;">
         <span class="mini-badge ${status === 'approved' ? 'auto' : (status === 'rejected' ? '' : 'manuell')}" style="font-size:11px;">${TS_STATUS_LABEL[status]}</span>
-        ${status === 'rejected' && contractorTimesheet.review_note ? `<div class="banner error" style="margin-top:10px;">Grund der Ablehnung: ${contractorTimesheet.review_note}</div>` : ''}
+        ${status === 'rejected' && contractorTimesheet.review_note ? `<div class="banner error" style="margin-top:10px;">Grund der Ablehnung: ${esc(contractorTimesheet.review_note)}</div>` : ''}
         ${locked ? `<div class="empty" style="text-align:left;padding:6px 0;">${status === 'approved' ? 'Freigegeben – keine Änderung mehr möglich.' : 'Eingereicht – wird geprüft, solange keine Änderung möglich.'}</div>` : ''}
       </div>
       <div class="table-scroll">
