@@ -188,11 +188,13 @@ let tsFilterStatus = 'submitted';
 // die Person laut RLS Zugriff hat) - wird nur für die KI-Vorschläge-Projektauswahl gebraucht,
 // weil ein Vorschlag dort wahlweise einem KH- oder peax-Projekt zugeordnet werden kann.
 let allowedOrgs = [];
+let istAdmin = false; // sieht diese Person den Reiter Finance? (user_access.role = 'admin')
 let activeOrg = null;
 const ORG_LABELS = { kh: 'KH', peax: 'peax' };
 let activeTab = 'dashboard';
 // Welches Klappmenü ist gerade offen (Name der Gruppe), null = keines.
 let offenesMenu = null;
+let bankJahr = new Date().getFullYear(); // gewähltes Jahr in der Jahresübersicht
 
 // Aufbau der oberen Navigation. Ein Eintrag ohne "kinder" ist ein einzelner
 // Reiter, einer mit "kinder" wird zu einem Klappmenü zusammengefasst.
@@ -217,10 +219,21 @@ const NAV = [
     badge: () => data.timesheets.filter(t => t.status === 'submitted').length },
   { key: 'ki', label: 'Eingangsrechnungen',
     badge: () => data.ki_vorschlaege.filter(v => v.status === 'pending').length },
-  { label: 'Finance', kinder: [
+  // Finance enthält Provisionssätze und die firmenübergreifenden Zahlen für die
+  // Bank - nur für Admins. Das Ausblenden hier ist die Bequemlichkeit; die
+  // eigentliche Sperre sitzt in der Datenbank (siehe sql/20_migration_rollen.sql),
+  // denn ein verstecktes Menü hält niemanden auf, der die Konsole öffnet.
+  { label: 'Finance', nurAdmin: true, kinder: [
     { key: 'provisionen', label: 'Provisionen' },
+    { key: 'bank', label: 'Jahresübersicht SOLL' },
   ] },
 ];
+
+// Reiter, die diese Person tatsächlich sehen darf.
+function sichtbareNav() { return NAV.filter(e => !e.nurAdmin || istAdmin); }
+function darfTab(key) {
+  return sichtbareNav().some(e => e.key === key || (e.kinder || []).some(k => k.key === key));
+}
 
 // Klick irgendwo anders und Escape schließen ein offenes Menü. Bewusst HIER auf
 // oberster Ebene registriert und nicht in wireTabEvents(): dort käme bei jedem
@@ -236,7 +249,7 @@ function navBadge(eintrag) {
 }
 
 function navHTML() {
-  return NAV.map(eintrag => {
+  return sichtbareNav().map(eintrag => {
     const n = navBadge(eintrag);
     const zahl = n ? ` (${n})` : '';
     if (!eintrag.kinder) {
@@ -543,6 +556,118 @@ function statusFromErf(erf, hasSoll) {
 }
 function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return MONTH_NAMES[mo - 1] + ' ' + y; }
 function monthLabelEN(m) { const [y, mo] = m.split('-').map(Number); return MONTH_NAMES_EN[mo - 1] + ' ' + y; }
+
+// ---------- JAHRESÜBERSICHT (Bank) ----------
+
+// SOLL-Zahlen beider Firmen nebeneinander, monatsweise - die Aufstellung, die
+// bisher von Hand in Excel gepflegt wurde und an die Bank geht.
+//
+// ACHTUNG, bewusste Ausnahme: Dies ist die EINZIGE Stelle, an der KH und peax
+// gemeinsam dargestellt werden. Überall sonst gilt die strikte Trennung nach
+// activeOrg (siehe CLAUDE.md). Hier ist die Vermischung genau der Zweck - die
+// Bank will die GmbH als Ganzes sehen. Deshalb data.allEntries statt data.entries.
+//
+// Wer nur für eine Firma freigeschaltet ist, sieht durch RLS auch nur deren
+// Zahlen; der Summenblock wird dann weggelassen, damit "Total GmbH" nicht eine
+// Vollständigkeit vortäuscht, die es für diese Person nicht gibt.
+
+function bankJahre() {
+  const set = new Set(data.allEntries.filter(e => e.kind === 'soll' && e.month).map(e => yearOfMonth(e.month)));
+  set.add(new Date().getFullYear());
+  return Array.from(set).filter(y => y > 1990 && y < 2200).sort((a, b) => b - a);
+}
+
+// Liefert je Monat { umsatz, kosten, rohertrag } für eine Firma - oder für alle
+// freigeschalteten Firmen zusammen, wenn org null ist.
+function bankZeilen(org, monate) {
+  return monate.map(m => {
+    const treffer = data.allEntries.filter(e => {
+      if (e.kind !== 'soll' || e.month !== m) return false;
+      const p = project(e.project_id);
+      if (!p) return false;
+      return org ? p.org === org : allowedOrgs.includes(p.org);
+    });
+    return sumEntries(treffer);
+  });
+}
+
+function bankBlockHTML(titel, monate, werte, hervorgehoben) {
+  const zeile = (name, feld, fett) => `
+    <tr${fett ? ' style="font-weight:700;"' : ''}>
+      <td style="position:sticky;left:0;background:var(--card);${fett ? 'font-weight:700;' : ''}">${esc(name)}</td>
+      ${werte.map(w => `<td style="text-align:right;white-space:nowrap;">${fmtEUR(w[feld])}</td>`).join('')}
+      <td style="text-align:right;white-space:nowrap;border-left:1px solid var(--border);">
+        ${fmtEUR(werte.reduce((s, w) => s + w[feld], 0))}
+      </td>
+    </tr>`;
+  return `
+    <div class="card panel" style="margin-bottom:14px;${hervorgehoben ? 'border-color:var(--accent-ink);' : ''}">
+      <h3 style="margin:0 0 8px;${hervorgehoben ? 'color:var(--accent-ink);' : ''}">${esc(titel)}</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th style="position:sticky;left:0;background:var(--card);">&nbsp;</th>
+            ${monate.map(m => `<th style="text-align:right;">${esc(MONTH_NAMES[Number(m.split('-')[1]) - 1])}</th>`).join('')}
+            <th style="text-align:right;border-left:1px solid var(--border);">Gesamt</th>
+          </tr></thead>
+          <tbody>
+            ${zeile('Umsatzerlöse', 'umsatz', false)}
+            ${zeile('Kosten', 'kosten', false)}
+            ${zeile('Rohertrag', 'rohertrag', true)}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function bankHTML() {
+  const monate = monthsInYear(bankJahr);
+  const orgs = allowedOrgs.slice().sort();
+  return `
+    <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
+      <div>
+        <h2 style="margin:0 0 2px;">Jahresübersicht SOLL</h2>
+        <div class="sub">
+          Geplanter Umsatz, geplante Kosten und Rohertrag je Monat – ${orgs.length > 1 ? 'für KH und peax getrennt und in Summe' : 'für ' + (ORG_LABELS[orgs[0]] || orgs[0])}.
+          Basis sind die SOLL-Stunden × Charge bzw. × Pay. Die einzige Ansicht, die beide Firmen zusammen zeigt.
+        </div>
+      </div>
+      <div class="toolbar" style="margin:0;">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Jahr:</label>
+        <select id="bankJahrSel">
+          ${bankJahre().map(j => `<option value="${j}" ${j === bankJahr ? 'selected' : ''}>${j}</option>`).join('')}
+        </select>
+        <button class="btn" id="bankExportBtn">Als Excel exportieren</button>
+      </div>
+    </div>
+    ${orgs.map(o => bankBlockHTML(ORG_LABELS[o] || o, monate, bankZeilen(o, monate), false)).join('')}
+    ${orgs.length < 2 ? '' : bankBlockHTML('Total GmbH', monate, bankZeilen(null, monate), true)}
+    <div class="sub" style="margin-top:4px;">
+      Rohertrag = Umsatzerlöse − Kosten. Perm-Projekte zählen mit ihrer Pauschale (1 „Stunde" × Satz).
+    </div>`;
+}
+
+function exportBankReport() {
+  if (typeof XLSX === 'undefined') { alert('Die Excel-Bibliothek konnte nicht geladen werden (CDN/Internetverbindung prüfen).'); return; }
+  const monate = monthsInYear(bankJahr);
+  const orgs = allowedOrgs.slice().sort();
+  const rows = [];
+  const block = (titel, werte) => {
+    ['umsatz', 'kosten', 'rohertrag'].forEach(feld => {
+      const name = feld === 'umsatz' ? 'Umsatzerlöse' : (feld === 'kosten' ? 'Kosten' : 'Rohertrag');
+      const zeile = { Bereich: titel, Position: name };
+      monate.forEach((m, i) => { zeile[MONTH_NAMES[i]] = round2(werte[i][feld]); });
+      zeile['Gesamt'] = round2(werte.reduce((s, w) => s + w[feld], 0));
+      rows.push(zeile);
+    });
+  };
+  orgs.forEach(o => block(ORG_LABELS[o] || o, bankZeilen(o, monate)));
+  if (orgs.length > 1) block('Total GmbH', bankZeilen(null, monate));
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'SOLL ' + bankJahr);
+  XLSX.writeFile(wb, `Jahresuebersicht_SOLL_${bankJahr}.xlsx`);
+}
 
 // ---------- PROVISIONEN ----------
 
@@ -867,7 +992,7 @@ function renderConsultantModal(c) {
       <h3>${c.id ? 'Consultant bearbeiten' : 'Neuer Consultant'}</h3>
       <div class="field"><label>Name</label><input type="text" id="cf_name" value="${esc(v.name || '')}"></div>
       <div class="field-row">
-        <div class="field"><label>Provisionssatz (monatlich, individuell)</label><input type="number" step="0.01" id="cf_rate" value="${v.rate}"></div>
+        ${!istAdmin ? '' : `<div class="field"><label>Provisionssatz (monatlich, individuell)</label><input type="number" step="0.01" id="cf_rate" value="${v.rate ?? 0}"></div>`}
         <div class="field"><label>Ist Team-Lead?</label>
           <select id="cf_is_team_lead">
             <option value="false" ${!v.is_team_lead ? 'selected' : ''}>Nein</option>
@@ -877,13 +1002,14 @@ function renderConsultantModal(c) {
       </div>
       <div id="cf_team_lead_fields" style="display:${v.is_team_lead ? '' : 'none'};">
         <div class="field-row">
-          <div class="field"><label>Team-Satz</label><input type="number" step="0.01" id="cf_team_rate" value="${v.team_rate}"></div>
+          ${!istAdmin ? '' : `
+          <div class="field"><label>Team-Satz</label><input type="number" step="0.01" id="cf_team_rate" value="${v.team_rate ?? 0}"></div>
           <div class="field"><label>Abrechnungszeitraum</label>
             <select id="cf_team_rate_period">
               <option value="quarterly" ${v.team_rate_period !== 'yearly' ? 'selected' : ''}>Pro Quartal</option>
               <option value="yearly" ${v.team_rate_period === 'yearly' ? 'selected' : ''}>Einmal pro Jahr</option>
             </select>
-          </div>
+          </div>`}
         </div>
         <div class="field">
           <label>Team-Mitglieder (deren Rohertrag für diesen Bonus zählt)</label>
@@ -913,13 +1039,20 @@ function renderConsultantModal(c) {
   document.getElementById('modalCancelConsultant').addEventListener('click', () => { modalConfig = null; render(); });
   if (c.id) document.getElementById('modalDeleteConsultant').addEventListener('click', () => deleteConsultant(c.id));
   document.getElementById('modalSaveConsultant').addEventListener('click', async () => {
+    // Name und Team-Lead-Kennzeichen bleiben in consultants (die brauchen alle),
+    // die Provisionssätze gehen in die admin-only Tabelle consultant_rates.
     const payload = {
       org: c.id ? c.values.org : activeOrg, // Firma steht fest, sobald der Consultant existiert
       name: document.getElementById('cf_name').value.trim(),
-      rate: Number(document.getElementById('cf_rate').value) || 0,
       is_team_lead: document.getElementById('cf_is_team_lead').value === 'true',
-      team_rate: Number(document.getElementById('cf_team_rate').value) || 0,
-      team_rate_period: document.getElementById('cf_team_rate_period').value === 'yearly' ? 'yearly' : 'quarterly',
+    };
+    // Die Satzfelder gibt es im Formular nur für Admins - daher hier absichern,
+    // sonst greift der Code ins Leere, sobald ein Nicht-Admin speichert.
+    const feld = (id) => document.getElementById(id);
+    const satzPayload = !istAdmin ? null : {
+      rate: Number(feld('cf_rate') ? feld('cf_rate').value : 0) || 0,
+      team_rate: Number(feld('cf_team_rate') ? feld('cf_team_rate').value : 0) || 0,
+      team_rate_period: (feld('cf_team_rate_period') || {}).value === 'yearly' ? 'yearly' : 'quarterly',
     };
     const checkedMemberIds = Array.from(document.querySelectorAll('.cf_team_member:checked')).map(el => el.value);
     let consultantId = c.id;
@@ -929,6 +1062,15 @@ function renderConsultantModal(c) {
       const inserted = await save(sb.from('consultants').insert(payload).select().single(), 'Consultant');
       if (!inserted) return; // ohne angelegten Consultant ergeben die Team-Zuordnungen unten keinen Sinn
       consultantId = inserted.id;
+    }
+    // Provisionssätze getrennt speichern. Nur Admins dürfen das; für alle
+    // anderen weist die Datenbank es ab - deshalb hier nur versuchen, wenn die
+    // Person überhaupt Admin ist, sonst gäbe es bei jedem Speichern eine
+    // Fehlermeldung für etwas, das gar nicht angezeigt wurde.
+    if (consultantId && istAdmin && satzPayload) {
+      await save(
+        sb.from('consultant_rates').upsert({ consultant_id: consultantId, ...satzPayload }, { onConflict: 'consultant_id' }),
+        'Provisionssätze');
     }
     // Team-Mitgliedschaften abgleichen (nur relevant, falls dieser Consultant Team-Lead ist) -
     // bestehende entfernen, die nicht mehr angehakt sind, neue hinzufügen. Falls die Migration
@@ -2029,7 +2171,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }] = await Promise.all([
     loadTable('projects', 'created_at'),
     loadTable('entries'),
     loadTable('consultants', 'created_at'),
@@ -2052,6 +2194,10 @@ async function loadAll() {
     loadTable('placements', 'created_at', false),
     // kunden (CRM-Stammdaten pro Kunde) ist ebenfalls optional (siehe migration_kunden.sql).
     loadTable('kunden', 'name'),
+    // consultant_rates ist admin-only (Migration 20). Für alle anderen kommt
+    // hier eine leere Liste zurück - kein Fehler, kein Hinweis, die Sätze sind
+    // für sie schlicht nicht vorhanden.
+    loadTable('consultant_rates'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -2063,10 +2209,16 @@ async function loadAll() {
   if (e6 || e7 || e8 || e9) console.warn('Contractor-Timesheets konnten nicht geladen werden (migration_contractor_timesheets.sql ausgeführt?)', e6, e7, e8, e9);
   if (e10 || e11) console.warn('CRM-Kandidaten konnten nicht geladen werden (migration_crm.sql/migration_crm_subprojekte.sql ausgeführt?)', e10, e11);
   if (e12) console.warn('Kunden-CRM konnte nicht geladen werden (migration_kunden.sql ausgeführt?)', e12);
+  if (e13) console.warn('Provisionssätze konnten nicht geladen werden (20_migration_rollen.sql ausgeführt?)', e13);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
   data.entries = (entries || []).filter(e => projectIds.has(e.project_id));
+  // Ungefiltert für die Jahresübersicht im Tab "Finance": die braucht KH und peax
+  // nebeneinander. Sonst gilt weiterhin die strikte Trennung - überall sonst wird
+  // data.entries verwendet, das nur die aktive Firma enthält. RLS begrenzt das
+  // hier ohnehin auf die Firmen, für die diese Person freigeschaltet ist.
+  data.allEntries = entries || [];
   data.contractors = (contractors || []).filter(c => c.org === activeOrg);
   data.contractorProjects = (contractorProjects || []).filter(cp => projectIds.has(cp.project_id));
   data.timesheets = (timesheets || []).filter(t => projectIds.has(t.project_id));
@@ -2077,6 +2229,23 @@ async function loadAll() {
   data.placements = (candidateProjects || []).filter(cp => candidateIds.has(cp.candidate_id));
   data.kunden = (kunden || []).filter(k => k.org === activeOrg);
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
+  // Provisionssätze liegen seit Migration 20 in einer eigenen, nur für Admins
+  // lesbaren Tabelle. Für alle anderen kommt hier schlicht nichts zurück - und
+  // zwar von der Datenbank verweigert, nicht vom Frontend versteckt. Die Sätze
+  // werden in die Consultant-Objekte gemischt, damit der restliche Code
+  // unverändert mit c.rate / c.team_rate arbeiten kann.
+  const satzVon = new Map((consultantRates || []).map(r => [r.consultant_id, r]));
+  const satzRein = (c) => {
+    const r = satzVon.get(c.id);
+    return Object.assign(c, {
+      rate: r ? r.rate : null,
+      team_rate: r ? r.team_rate : null,
+      team_rate_period: r ? r.team_rate_period : 'quarterly',
+    });
+  };
+  // Auf der ungefilterten Liste, nicht auf data.consultants: das sind dieselben
+  // Objekte (filter kopiert nicht), damit sind beide Sichten versorgt.
+  (allConsultants || []).forEach(satzRein);
   data.ki_vorschlaege = kiVorschlaege || [];
   data.team_memberships = teamMemberships || [];
   render();
@@ -2087,9 +2256,18 @@ async function loadAll() {
 // Merkt sich die zuletzt gewählte Firma im Browser (localStorage), damit man nach einem
 // Reload nicht immer wieder auf die erste Firma zurückfällt.
 async function initOrgAccess() {
-  const { data: rows, error } = await sb.from('user_access').select('org');
-  if (error) { console.error('user_access konnte nicht geladen werden', error); allowedOrgs = []; activeOrg = null; return; }
+  // role kommt seit Migration 20 dazu. Fällt die Abfrage deswegen auf die Nase
+  // (Migration noch nicht ausgeführt), wird ohne role weitergemacht - dann ist
+  // niemand Admin und Finance bleibt für alle unsichtbar. Lieber zu streng als
+  // zu offen.
+  let { data: rows, error } = await sb.from('user_access').select('org, role');
+  if (error) {
+    console.warn('user_access mit role nicht lesbar (Migration 20 ausgeführt?) - versuche ohne', error);
+    ({ data: rows, error } = await sb.from('user_access').select('org'));
+  }
+  if (error) { console.error('user_access konnte nicht geladen werden', error); allowedOrgs = []; activeOrg = null; istAdmin = false; return; }
   allowedOrgs = Array.from(new Set((rows || []).map(r => r.org)));
+  istAdmin = (rows || []).some(r => r.role === 'admin');
   const saved = localStorage.getItem('activeOrg');
   activeOrg = allowedOrgs.includes(saved) ? saved : (allowedOrgs[0] || null);
 }
@@ -2262,6 +2440,9 @@ function render() {
   }));
 
   const content = document.getElementById('tab-content');
+  // Sicherheitsnetz: Wer den Reiter nicht sehen darf, landet auf dem Dashboard -
+  // auch wenn activeTab auf anderem Weg gesetzt wurde.
+  if (!darfTab(activeTab)) activeTab = 'dashboard';
   if (activeTab === 'dashboard') content.innerHTML = dashboardHTML();
   else if (activeTab === 'projekte') content.innerHTML = projekteHTML();
   else if (activeTab === 'soll') content.innerHTML = monthEntryHTML('soll');
@@ -2272,6 +2453,7 @@ function render() {
   else if (activeTab === 'kunden') content.innerHTML = kundenHTML();
   else if (activeTab === 'crm') content.innerHTML = crmHTML();
   else if (activeTab === 'placements') content.innerHTML = placementsHTML();
+  else if (activeTab === 'bank') content.innerHTML = bankHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
@@ -3129,6 +3311,11 @@ function wireTabEvents() {
   document.querySelectorAll('[data-del-consultant]').forEach(b => b.addEventListener('click', () => deleteConsultant(b.dataset.delConsultant)));
   const kiFilterStatusSel = document.getElementById('kiFilterStatusSel');
   if (kiFilterStatusSel) kiFilterStatusSel.addEventListener('change', () => { kiFilterStatus = kiFilterStatusSel.value; render(); });
+
+  const bankJahrSel = document.getElementById('bankJahrSel');
+  if (bankJahrSel) bankJahrSel.addEventListener('change', () => { bankJahr = Number(bankJahrSel.value); render(); });
+  const bankExportBtn = document.getElementById('bankExportBtn');
+  if (bankExportBtn) bankExportBtn.addEventListener('click', exportBankReport);
   document.querySelectorAll('[data-approve-ki]').forEach(b => b.addEventListener('click', () => approveKiVorschlag(b.dataset.approveKi)));
   document.querySelectorAll('[data-reject-ki]').forEach(b => b.addEventListener('click', () => rejectKiVorschlag(b.dataset.rejectKi)));
   document.querySelectorAll('[data-reset-ki]').forEach(b => b.addEventListener('click', () => resetKiVorschlag(b.dataset.resetKi)));
