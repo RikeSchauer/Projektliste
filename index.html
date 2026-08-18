@@ -301,6 +301,16 @@ function statusBadgeClass(status) { return status === 'Noch nicht aktiv' ? 'Bevo
 // ---------- AUTOMATISCHE SOLL-BERECHNUNG (aus Projektlaufzeit) ----------
 
 function round1(n) { return Math.round((n || 0) * 10) / 10; }
+// Für Geldbeträge und Tagesmengen im Kundenreport - eine Nachkommastelle reicht
+// dort nicht: 1,2 statt 1,22 Tage sind bei 800 EUR/Tag schon 16 EUR Unterschied.
+function round2(n) { return Math.round((n || 0) * 100) / 100; }
+
+// Umrechnung Stunden -> Tage für Placements mit Tagessatz. Bewusst anteilig:
+// wer an einem Tag 9,75 Stunden arbeitet, hat 1,22 Tage geleistet, nicht 1. Ein
+// Deckel auf ganze Tage würde jede Mehrarbeit verschenken.
+// Falls das je nach Kunde abweicht, gehört daraus ein Feld am Placement - dann
+// hier durch pl.stunden_pro_tag ersetzen.
+const STUNDEN_PRO_TAG = 8;
 function parseDateUTC(s) { if (!s) return null; const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); }
 function daysInclusive(a, b) { return Math.round((b - a) / 86400000) + 1; }
 function monthRangeUTC(monthStr) { const [y, m] = monthStr.split('-').map(Number); return [Date.UTC(y, m - 1, 1), Date.UTC(y, m, 0)]; }
@@ -1276,6 +1286,36 @@ function approvedHoursForProjectMonth(projectId, month) {
   return data.timesheetDays.filter(d => tsIds.has(d.timesheet_id)).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
 }
 
+// Dasselbe, aber für EINEN bestimmten Freelancer. Für den Kundenreport ist das
+// die richtige Zahl: dort steht pro Zeile ein Freelancer mit SEINEM Stundensatz.
+// Die Projektsumme oben zählt dagegen alle Freelancer zusammen (so gewollt, sie
+// füllt die IST-Stunden des Projekts) - in einer Rechnungszeile wäre sie falsch.
+// Ist Migration 19 (candidates.contractor_id) in dieser Datenbank schon gelaufen?
+// Solange nicht, wird das Auswahlfeld nicht angezeigt und das Feld nicht
+// mitgespeichert - sonst würde jedes Speichern eines Kandidaten scheitern, nur
+// weil die App neuer ist als die Datenbank.
+function hatContractorVerknuepfung() {
+  return !data.candidates.length || Object.prototype.hasOwnProperty.call(data.candidates[0], 'contractor_id');
+}
+
+function approvedHoursForContractorMonth(projectId, contractorId, month) {
+  if (!contractorId) return null;
+  const tsIds = new Set(data.timesheets.filter(t =>
+    t.project_id === projectId && t.month === month && t.status === 'approved' && t.contractor_id === contractorId
+  ).map(t => t.id));
+  if (!tsIds.size) return 0;
+  return data.timesheetDays.filter(d => tsIds.has(d.timesheet_id)).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+}
+
+// Wie viele verschiedene Freelancer haben in diesem Monat freigegebene Stunden
+// auf dem Projekt? Bei genau einem ist die Projektsumme automatisch auch dessen
+// Summe - dann darf der Report sie auch ohne Verknüpfung verwenden.
+function approvedContractorCount(projectId, month) {
+  return new Set(data.timesheets
+    .filter(t => t.project_id === projectId && t.month === month && t.status === 'approved')
+    .map(t => t.contractor_id)).size;
+}
+
 // Baut eine Excel-Datei im Stil des bisherigen TimesheetPortal-Exports: eine Zeile pro Placement
 // mit tatsächlich erfassten (freigegebenen) Stunden im gewählten Monat. "Rate code"/"Rate
 // description" entsprechen Projektnummer/Projektname, "Placement code/description"/"PO" und
@@ -1287,34 +1327,77 @@ function generateKundenReport() {
   const k = kunde(reportKundeId);
   const candidatesOfKunde = data.candidates.filter(cd => cd.kunde_id === reportKundeId);
   const rows = [];
+  const warnungen = [];
   candidatesOfKunde.forEach(cd => {
     placementsOf(cd.id).filter(pl => pl.linked_project_id).forEach(pl => {
-      const hours = approvedHoursForProjectMonth(pl.linked_project_id, reportMonth);
+      // Stunden IMMER nur die dieses einen Freelancers. Ohne Verknüpfung
+      // (candidates.contractor_id) geht das nur, wenn auf dem Projekt in diesem
+      // Monat ohnehin nur eine Person gebucht hat - sonst würde die Zeile die
+      // Stunden der Kollegen mitberechnen und der Kunde zu viel bezahlen.
+      let hours = approvedHoursForContractorMonth(pl.linked_project_id, cd.contractor_id, reportMonth);
+      if (hours === null) {
+        const anzahl = approvedContractorCount(pl.linked_project_id, reportMonth);
+        if (anzahl > 1) {
+          warnungen.push(`${cd.contractor || 'Unbenannter Kandidat'} (${pl.projekt_name || 'ohne Projektnamen'}): `
+            + `${anzahl} Freelancer buchen auf dieses Projekt, aber es ist kein Timesheet-Zugang hinterlegt. `
+            + `Zeile weggelassen – bitte im Tab "CRM" den Contractor zuordnen.`);
+          return;
+        }
+        hours = approvedHoursForProjectMonth(pl.linked_project_id, reportMonth);
+      }
       if (!hours) return; // wie im Original-Report: nur Zeilen mit tatsächlich erfassten Stunden
       const payRate = pl.pay_rate || 0;
       const chargeRate = pl.charge_rate || 0;
       const consultantNames = [pl.consultant1_id, pl.consultant2_id].filter(Boolean).map(consultantName).join(' / ');
+
+      // Abrechnungsart berücksichtigen. Bisher wurde IMMER stundenbasiert
+      // gerechnet, auch wenn "Days" oder "Fixed" in der Spalte Units stand.
+      let menge = hours;
+      if (pl.rate_unit === 'pauschale') {
+        // Pauschale: die Stunden sind für die Rechnung ohne Bedeutung, es gilt
+        // der vereinbarte Festbetrag. Menge 1, damit Menge x Satz = Betrag.
+        menge = 1;
+      } else if (pl.rate_unit === 'tag') {
+        // Tagessatz: die Timesheets erfassen Stunden pro Tag, abgerechnet werden
+        // Tage. Umgerechnet wird anteilig (siehe STUNDEN_PRO_TAG) - 9,75 Stunden
+        // sind 1,22 Tage. Auf zwei Nachkommastellen gerundet, damit der Kunde
+        // Menge x Satz nachrechnen kann und dasselbe herauskommt.
+        menge = round2(hours / STUNDEN_PRO_TAG);
+      }
+      const totalPay = round2(menge * payRate);
+      const totalCharge = round2(menge * chargeRate);
+
       rows.push({
         'Placement code': pl.placement_code || '',
         'Contractor name': cd.contractor || '',
         'Client name': k ? k.name : '',
         'Placement description': pl.placement_description || '',
-        'Work quantity': round1(hours),
+        'Work quantity': round2(menge),
         'Rate code': pl.projekt_nummer || '',
         'Rate description': pl.projekt_name || '',
         'Units': pl.rate_unit === 'tag' ? 'Days' : (pl.rate_unit === 'pauschale' ? 'Fixed' : 'Hours'),
         'Pay rate': payRate,
-        'Total pay': round1(hours * payRate),
+        'Total pay': totalPay,
         'Charge rate': chargeRate,
-        'Total charge': round1(hours * chargeRate),
-        'Margin rate': round1(chargeRate - payRate),
-        'Total margin': round1(hours * (chargeRate - payRate)),
+        'Total charge': totalCharge,
+        'Margin rate': round2(chargeRate - payRate),
+        'Total margin': round2(totalCharge - totalPay),
         'Placement consultant': consultantNames,
         'Placement PO': pl.po_referenz || '',
         'Placement: Purchase Order / Invoice Reference': pl.po_referenz || '',
       });
     });
   });
+  // Weggelassene Zeilen IMMER melden, bevor die Datei entsteht. Ein Report, dem
+  // stillschweigend Positionen fehlen, ist schlimmer als gar keiner - er sieht
+  // vollständig aus und geht so an den Kunden.
+  if (warnungen.length) {
+    const weiter = confirm(
+      `${warnungen.length} Position(en) konnten nicht sicher berechnet werden und fehlen im Report:\n\n`
+      + warnungen.map(w => '• ' + w).join('\n\n')
+      + `\n\nTrotzdem herunterladen? Der Report ist dann unvollständig.`);
+    if (!weiter) return;
+  }
   if (!rows.length) { alert('Keine freigegebenen Stunden für diesen Kunden/Monat gefunden.'); return; }
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
@@ -1549,6 +1632,18 @@ function renderCandidateModal(c) {
       <div class="field-row">
         <div class="field"><label>Freelancer/Kandidat</label><input type="text" id="cd_contractor" value="${esc(v.contractor || '')}"></div>
         <div class="field"><label>E-Mail Freelancer</label><input type="text" id="cd_freelancer_email" value="${esc(v.freelancer_email || '')}"></div>
+        ${!hatContractorVerknuepfung() ? '' : `
+        <div class="field">
+          <label>Timesheet-Zugang (Contractor)</label>
+          <select id="cd_contractor_id">
+            <option value="">– keiner –</option>
+            ${data.contractors.map(ct => `<option value="${ct.id}" ${v.contractor_id === ct.id ? 'selected' : ''}>${esc(ct.name)}</option>`).join('')}
+          </select>
+          <div style="font-size:11px;color:var(--muted);margin-top:3px;">
+            Nötig, sobald mehrere Freelancer auf demselben Projekt buchen – nur damit kann der
+            Kundenreport die Stunden der richtigen Person zuordnen.
+          </div>
+        </div>`}
       </div>
       <div class="field"><label>VAT-ID Freelancer</label><input type="text" id="cd_vat_id" value="${esc(v.vat_id || '')}"></div>
       <div class="field-row">
@@ -1626,6 +1721,8 @@ function renderCandidateModal(c) {
       org: c.id ? c.values.org : activeOrg,
       contractor: document.getElementById('cd_contractor').value.trim(),
       freelancer_email: document.getElementById('cd_freelancer_email').value.trim() || null,
+      ...(hatContractorVerknuepfung() && document.getElementById('cd_contractor_id')
+        ? { contractor_id: document.getElementById('cd_contractor_id').value || null } : {}),
       vat_id: document.getElementById('cd_vat_id').value.trim() || null,
       kunde_id: kundeIdVal,
       kunde: kundeName(kundeIdVal),
