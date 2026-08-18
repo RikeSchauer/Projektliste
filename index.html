@@ -627,10 +627,6 @@ function bankHTML() {
     <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
       <div>
         <h2 style="margin:0 0 2px;">Jahresübersicht SOLL</h2>
-        <div class="sub">
-          Geplanter Umsatz, geplante Kosten und Rohertrag je Monat – ${orgs.length > 1 ? 'für KH und peax getrennt und in Summe' : 'für ' + (ORG_LABELS[orgs[0]] || orgs[0])}.
-          Basis sind die SOLL-Stunden × Charge bzw. × Pay. Die einzige Ansicht, die beide Firmen zusammen zeigt.
-        </div>
       </div>
       <div class="toolbar" style="margin:0;">
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Jahr:</label>
@@ -642,9 +638,7 @@ function bankHTML() {
     </div>
     ${orgs.map(o => bankBlockHTML(ORG_LABELS[o] || o, monate, bankZeilen(o, monate), false)).join('')}
     ${orgs.length < 2 ? '' : bankBlockHTML('Total GmbH', monate, bankZeilen(null, monate), true)}
-    <div class="sub" style="margin-top:4px;">
-      Rohertrag = Umsatzerlöse − Kosten. Perm-Projekte zählen mit ihrer Pauschale (1 „Stunde" × Satz).
-    </div>`;
+`;
 }
 
 function exportBankReport() {
@@ -2105,7 +2099,6 @@ function crmHTML() {
       <div class="toolbar" style="margin-bottom:10px;">
         <button class="btn primary" id="addCandidateBtn">+ Neuer Kandidat</button>
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 10px;">Perspektivisch sollen diese Daten aus einem separaten Tool gezogen werden (aktuell noch im Aufbau) - bis dahin hier direkt pflegen. Ein Kandidat kann mehrere Placements beim selben Kunden haben (je mit eigenen Konditionen). "Projekt erzeugen" legt pro Placement einen echten Eintrag im Tab "Projekte" an. Gesamtübersicht über alle Placements: Tab "Placements".</div>
       <div class="table-scroll">
         <table>
           <thead><tr><th>Freelancer</th><th>Kunde</th><th>Placements</th><th>CRM-Status</th><th>Aktionen</th></tr></thead>
@@ -2414,8 +2407,7 @@ function render() {
           : `<div class="kh-wordmark">KONZEPT<br>HAUS</div>`}
         <div>
           <h1>Projektliste – ${ORG_LABELS[activeOrg] || activeOrg} Freelancer Dashboard</h1>
-          <div class="sub">Projekte, SOLL/IST-Erfassung &amp; Kennzahlen – live geteilt im Team</div>
-        </div>
+          </div>
       </div>
       <div class="userbar">
         ${allowedOrgs.length > 1 ? `
@@ -2428,7 +2420,6 @@ function render() {
     </header>
     <nav class="tabs">${navHTML()}</nav>
     <div id="tab-content"></div>
-    <footer class="hint">Daten liegen in Supabase und werden mit allen eingeloggten Teammitgliedern live geteilt.</footer>
   `;
   document.getElementById('logoutBtn').addEventListener('click', handleLogout);
   app.querySelectorAll('[data-org-switch]').forEach(b => b.addEventListener('click', () => setActiveOrg(b.dataset.orgSwitch)));
@@ -3059,7 +3050,6 @@ function monthEntryHTML(kind) {
     <div class="toolbar">
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
       <input type="month" id="monthPicker_${kind}" value="${monthVal}">
-      ${kind === 'soll' ? '<span style="font-size:12px;color:var(--muted);">Werte werden automatisch aus der Projektlaufzeit berechnet – <span class="mini-badge auto">auto</span> = berechnet, <span class="mini-badge manuell">manuell</span> = von dir angepasst.</span>' : ''}
     </div>
     <div class="toolbar" style="margin-bottom:10px;">
       <input type="text" id="entrySearchInput_${kind}" placeholder="🔍 Suchen (Kunde, Contractor, Status, Zahlen …)" style="width:340px;" value="${search}">
@@ -3162,7 +3152,6 @@ function kiVorschlaegeHTML() {
     <div class="toolbar" style="justify-content:space-between;flex-wrap:wrap;">
       <div>
         <h2 style="margin:0 0 2px;">Eingangsrechnungen aus Weclapp</h2>
-        <div class="sub">Aus den Eingangsrechnungen in Weclapp ermittelte IST-Stunden – bitte vor der Übernahme prüfen und ggf. korrigieren.</div>
       </div>
       <div class="toolbar" style="margin:0;">
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
