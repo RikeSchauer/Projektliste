@@ -846,7 +846,12 @@ function provisionenHTML() {
   // bekommen, aber trotzdem als Consultant für die Projektzuordnung existieren.
   const provisionRelevant = data.consultants.filter(c => c.is_team_lead || c.rate > 0);
   const teamLeads = provisionRelevant.filter(c => c.is_team_lead);
-  const individuals = provisionRelevant.filter(c => !c.is_team_lead);
+  // Jeder mit eigenem Satz, AUCH Team-Leads. Vorher stand hier
+  // "filter(c => !c.is_team_lead)" - damit fiel ein Team-Lead aus der
+  // monatlichen Einzelprovision komplett heraus, selbst wenn ein Satz
+  // hinterlegt war. Beides zusammen ist aber der Normalfall: monatlich der
+  // individuelle Satz, dazu am Perioden-Ende der Bonus auf den Team-Rohertrag.
+  const individuals = provisionRelevant.filter(c => (c.rate || 0) > 0);
 
   return `
     <div class="card panel">
@@ -887,7 +892,7 @@ function provisionenHTML() {
           <input type="month" id="provMonthPicker" value="${provMonth}">
         </div>
       </div>
-      ${!individuals.length ? '<div class="empty">Keine individuellen Consultants (ohne Team-Lead-Status) angelegt.</div>' : `
+      ${!individuals.length ? '<div class="empty">Kein Consultant mit individuellem Provisionssatz angelegt.</div>' : `
       <div class="table-scroll">
       <table>
         <thead><tr><th>Consultant</th><th>Zugerechneter Rohertrag</th><th>Satz</th><th>Provision ${monthLabel(provMonth)}</th><th></th></tr></thead>
@@ -896,7 +901,7 @@ function provisionenHTML() {
             const rev = attributedRevenue(c.id, monthEntries);
             const commission = rev * (c.rate || 0);
             return `<tr>
-              <td><strong>${esc(c.name)}</strong></td>
+              <td><strong>${esc(c.name)}</strong>${c.is_team_lead ? ' <span class="badge Aktiv">Team-Lead</span>' : ''}</td>
               <td>${fmtEUR(rev)}</td>
               <td>${fmtPct(c.rate)}</td>
               <td>${fmtEUR(commission)}</td>
