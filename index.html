@@ -2143,16 +2143,20 @@ function crmHTML() {
 // also nichts und wächst automatisch mit.
 const PAGE_SIZE = 1000;
 
-async function loadTable(name, orderCol, ascending) {
+// schluessel: Spalte, die als eindeutiges zweites Sortierkriterium dient.
+// Fast alle Tabellen heißen dort 'id' - consultant_rates hat aber keine
+// id-Spalte, sondern consultant_id als Schlüssel. Wird hier die falsche Spalte
+// sortiert, scheitert die ganze Abfrage und die Tabelle kommt leer zurück.
+async function loadTable(name, orderCol, ascending, schluessel) {
   let from = 0;
   const alle = [];
   for (;;) {
     let q = sb.from(name).select('*');
     if (orderCol) q = q.order(orderCol, { ascending: ascending !== false });
-    // id als zweites Sortierkriterium: ohne eindeutige Reihenfolge könnten bei
+    // Zweites Sortierkriterium: ohne eindeutige Reihenfolge könnten bei
     // gleichem created_at/month zwischen zwei Seiten Zeilen doppelt oder gar
     // nicht geliefert werden.
-    q = q.order('id', { ascending: true }).range(from, from + PAGE_SIZE - 1);
+    q = q.order(schluessel || 'id', { ascending: true }).range(from, from + PAGE_SIZE - 1);
     const { data, error } = await q;
     if (error) return { data: null, error };
     alle.push(...(data || []));
@@ -2197,7 +2201,7 @@ async function loadAll() {
     // consultant_rates ist admin-only (Migration 20). Für alle anderen kommt
     // hier eine leere Liste zurück - kein Fehler, kein Hinweis, die Sätze sind
     // für sie schlicht nicht vorhanden.
-    loadTable('consultant_rates'),
+    loadTable('consultant_rates', null, true, 'consultant_id'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
