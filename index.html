@@ -1107,6 +1107,12 @@ async function deleteConsultant(id) {
 
 function contractor(id) { return data.contractors.find(c => c.id === id); }
 function contractorName(id) { const c = contractor(id); return c ? c.name : '–'; }
+// Alias-Namen eines Contractors (Schreibweisen, unter denen er in Weclapp
+// Rechnungen stellt). Leer, solange Migration 22 nicht gelaufen ist.
+function aliaseVon(contractorId) {
+  if (!contractorId || !data.contractorAliase) return [];
+  return data.contractorAliase.filter(a => a.contractor_id === contractorId).map(a => a.alias).sort();
+}
 
 function openContractorModal(id) {
   const c = id ? contractor(id) : null;
@@ -1168,6 +1174,15 @@ function renderContractorModal(c) {
       <h3>${c.id ? 'Contractor bearbeiten' : 'Neuer Contractor'}</h3>
       <div class="field"><label>Name</label><input type="text" id="ctf_name" value="${esc(v.name || '')}"></div>
       <div class="field"><label>E-Mail (für den Timesheet-Login)</label><input type="text" id="ctf_email" value="${esc(v.email || '')}" placeholder="freelancer@beispiel.com"></div>
+      ${!data.contractorAliase ? '' : `
+      <div class="field">
+        <label>Rechnet auch ab als (ein Name pro Zeile)</label>
+        <textarea id="ctf_aliase" rows="3" style="width:100%;font-family:inherit;font-size:14px;padding:8px;border:1px solid var(--border);border-radius:8px;">${esc(aliaseVon(c.id).join('\n'))}</textarea>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;">
+          Namen, unter denen dieser Freelancer in Weclapp Rechnungen stellt – z.B. der volle Name,
+          wenn hier oben ein Kürzel steht, oder die Firmierung. Wird beim Rechnungsabgleich mitgeprüft.
+        </div>
+      </div>`}
       <div class="empty" style="text-align:left;padding:0 0 8px;">Sobald hier eine E-Mail hinterlegt ist, kann sich die Person auf der normalen Login-Seite mit "Registrieren" selbst einen Zugang anlegen (mit genau dieser E-Mail) und sieht danach nur ihr eigenes Timesheet.</div>
       <div class="field">
         <label>Kunde / Subprojekte aus dem CRM (worauf dieser Contractor Stunden buchen darf)</label>
@@ -1247,6 +1262,23 @@ function renderContractorModal(c) {
       const inserted = await save(sb.from('contractors').insert(payload).select().single(), 'Contractor');
       if (!inserted) return; // ohne angelegten Contractor ergeben die Projektzuordnungen unten keinen Sinn
       contractorId = inserted.id;
+    }
+    // Alias-Namen abgleichen: entfernte löschen, neue anlegen. Nur wenn das Feld
+    // überhaupt existiert (Migration 22 ausgeführt).
+    const aliasFeld = document.getElementById('ctf_aliase');
+    if (contractorId && aliasFeld) {
+      const neu = aliasFeld.value.split('\n').map(z => z.trim()).filter(Boolean);
+      const alt = aliaseVon(contractorId);
+      const raus = alt.filter(a => !neu.includes(a));
+      const rein = neu.filter(a => !alt.includes(a));
+      let aFehler = 0;
+      for (const a of raus) {
+        if (!await save(sb.from('contractor_aliase').delete().eq('contractor_id', contractorId).eq('alias', a), 'Alias entfernen', true)) aFehler++;
+      }
+      for (const a of rein) {
+        if (!await save(sb.from('contractor_aliase').insert({ contractor_id: contractorId, alias: a }), 'Alias anlegen', true)) aFehler++;
+      }
+      if (aFehler) alert(`Der Contractor wurde gespeichert, aber ${aFehler} Alias-Name(n) nicht. Details in der Browser-Konsole.`);
     }
     if (contractorId) {
       const checkedIds = Array.from(c.pickerChecked);
@@ -2173,7 +2205,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }] = await Promise.all([
     loadTable('projects', 'created_at'),
     loadTable('entries'),
     loadTable('consultants', 'created_at'),
@@ -2200,6 +2232,9 @@ async function loadAll() {
     // hier eine leere Liste zurück - kein Fehler, kein Hinweis, die Sätze sind
     // für sie schlicht nicht vorhanden.
     loadTable('consultant_rates', null, true, 'consultant_id'),
+    // Alias-Namen für den Weclapp-Abgleich (Migration 22) - optional wie die
+    // anderen neueren Tabellen.
+    loadTable('contractor_aliase'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -2212,6 +2247,7 @@ async function loadAll() {
   if (e10 || e11) console.warn('CRM-Kandidaten konnten nicht geladen werden (migration_crm.sql/migration_crm_subprojekte.sql ausgeführt?)', e10, e11);
   if (e12) console.warn('Kunden-CRM konnte nicht geladen werden (migration_kunden.sql ausgeführt?)', e12);
   if (e13) console.warn('Provisionssätze konnten nicht geladen werden (20_migration_rollen.sql ausgeführt?)', e13);
+  if (e14) console.warn('Alias-Namen konnten nicht geladen werden (22_migration_contractor_aliase.sql ausgeführt?)', e14);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
@@ -2222,6 +2258,7 @@ async function loadAll() {
   // hier ohnehin auf die Firmen, für die diese Person freigeschaltet ist.
   data.allEntries = entries || [];
   data.contractors = (contractors || []).filter(c => c.org === activeOrg);
+  data.contractorAliase = contractorAliase || [];
   data.contractorProjects = (contractorProjects || []).filter(cp => projectIds.has(cp.project_id));
   data.timesheets = (timesheets || []).filter(t => projectIds.has(t.project_id));
   const timesheetIds = new Set(data.timesheets.map(t => t.id));
