@@ -234,7 +234,7 @@ let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vor
 // migration_contractor_timesheets.sql). Komplett getrennt vom internen App-Zustand oben.
 let contractorProfile = null;
 let contractorProjects = [];
-let contractorMonth = currentMonthStr(); // function-Deklaration ist gehoisted, daher hier schon nutzbar
+let contractorMonth = currentMonthStr(); // wird beim Öffnen zusätzlich über monatBegrenzen() geprüft // function-Deklaration ist gehoisted, daher hier schon nutzbar
 let contractorSheets = []; // je Projekt: { proj, ts, days }
 const TS_STATUS_LABEL = { draft: 'Entwurf', submitted: 'Eingereicht', approved: 'Freigegeben', rejected: 'Abgelehnt' };
 let tsFilterStatus = 'submitted';
@@ -1410,18 +1410,21 @@ function timesheetsHTML() {
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Contractor</th><th>Kunde</th><th>Monat</th><th>Stunden</th><th>Status</th><th>Aktionen</th></tr></thead>
+          <thead><tr><th>Contractor</th><th>Kunde</th><th>Monat</th><th>Stunden</th><th>Notiz</th><th>Status</th><th>Aktionen</th></tr></thead>
           <tbody>
             ${list.map(t => {
               const p = project(t.project_id);
               return `<tr>
                 <td>${esc(contractorName(t.contractor_id))}</td><td>${esc(p ? (p.projektname ? p.kunde + ' – ' + p.projektname : p.kunde) : '–')}</td><td>${monthLabel(t.month)}</td>
                 <td>${fmtNum(totalOf(t.id), 1)}</td>
+                <td style="white-space:normal;min-width:240px;max-width:380px;">${(t.sonstiges || '').trim()
+                  ? `<span style="font-size:12px;line-height:1.45;">${esc(t.sonstiges)}</span>`
+                  : '<span class="empty" style="padding:0;">–</span>'}</td>
                 <td><span class="mini-badge ${t.status === 'approved' ? 'auto' : (t.status === 'rejected' ? '' : 'manuell')}">${TS_STATUS_LABEL[t.status]}</span>${t.status === 'rejected' && t.review_note ? ` <span style="color:var(--muted);font-size:11px;">(${esc(t.review_note)})</span>` : ''}</td>
                 <td>${t.status === 'submitted' ? `<button class="link" data-approve-ts="${t.id}">Freigeben</button> <button class="link danger" data-reject-ts="${t.id}">Ablehnen</button>` : '–'}</td>
               </tr>`;
             }).join('')}
-            ${!list.length ? '<tr><td colspan="6" class="empty">Keine Timesheets für diesen Filter.</td></tr>' : ''}
+            ${!list.length ? '<tr><td colspan="7" class="empty">Keine Timesheets für diesen Filter.</td></tr>' : ''}
           </tbody>
         </table>
       </div>
@@ -3638,6 +3641,7 @@ async function initContractorAccess() {
 }
 
 async function loadContractorPortal() {
+  contractorMonth = monatBegrenzen(contractorMonth);
   const { data: projects, error } = await sb.rpc('my_timesheet_projects');
   if (error) console.error('Projekte des Contractors konnten nicht geladen werden', error);
   contractorProjects = projects || [];
@@ -3681,6 +3685,29 @@ function wochenDesMonats(monthStr) {
 }
 
 const WOCHENTAGE = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+
+// Welche Monate darf ein Contractor im Portal auswählen? Grundsätzlich das
+// laufende Geschäftsjahr (= Kalenderjahr) bis zum aktuellen Monat. Zukünftige
+// Monate ergeben für eine Zeiterfassung keinen Sinn.
+// Ausnahme Januar: Dann bleibt der Dezember des Vorjahres offen, damit das alte
+// Jahr noch abgeschlossen werden kann - sonst stünde man am 1. Januar vor einem
+// nicht mehr erreichbaren Dezember.
+function timesheetMonatsGrenzen() {
+  const jetzt = new Date();
+  const jahr = jetzt.getFullYear();
+  const min = jetzt.getMonth() === 0 ? `${jahr - 1}-12` : `${jahr}-01`;
+  return { min, max: currentMonthStr() };
+}
+
+// Hält einen Monatswert innerhalb der erlaubten Spanne. Nötig, weil man in das
+// Feld auch tippen kann und der Browser min/max dabei nicht überall erzwingt.
+function monatBegrenzen(monatStr) {
+  const { min, max } = timesheetMonatsGrenzen();
+  if (!monatStr || !/^\d{4}-\d{2}$/.test(monatStr)) return max;
+  if (monatStr < min) return min;
+  if (monatStr > max) return max;
+  return monatStr;
+}
 
 function renderContractorPortal() {
   document.body.dataset.org = contractorProfile ? contractorProfile.org : '';
@@ -3761,7 +3788,8 @@ function renderContractorPortal() {
     </header>
     <div class="toolbar-filters no-print">
       <label>Monat:</label>
-      <input type="month" id="tsMonthInput" value="${contractorMonth}">
+      <input type="month" id="tsMonthInput" value="${contractorMonth}"
+        min="${timesheetMonatsGrenzen().min}" max="${timesheetMonatsGrenzen().max}">
       ${offen.length > 1 ? `<button class="btn" id="tsSubmitAll">Alle ${offen.length} einreichen</button>` : ''}
     </div>
 
@@ -3784,7 +3812,15 @@ function renderContractorPortal() {
   const printBtn = document.getElementById('tsPrintBtn');
   if (printBtn) printBtn.addEventListener('click', () => window.print());
   const monthInput = document.getElementById('tsMonthInput');
-  if (monthInput) monthInput.addEventListener('change', () => { contractorMonth = monthInput.value; loadContractorTimesheet(); });
+  if (monthInput) monthInput.addEventListener('change', () => {
+    const gewaehlt = monatBegrenzen(monthInput.value);
+    if (gewaehlt !== monthInput.value) {
+      monthInput.value = gewaehlt;
+      alert('Es können nur Monate des laufenden Geschäftsjahres bis zum aktuellen Monat erfasst werden.');
+    }
+    contractorMonth = gewaehlt;
+    loadContractorTimesheet();
+  });
 
   app.querySelectorAll('input[data-day]').forEach(inp => {
     inp.addEventListener('change', async () => {
