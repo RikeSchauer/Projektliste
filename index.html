@@ -4,130 +4,145 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Projektliste – Freelancer Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light;
-    --bg: #f4f6fb; --card: #ffffff; --border: #e3e7ef; --text: #1f2430; --muted: #6b7280;
-    --blue: #2563eb; --blue-bg: #eaf0fe;
-    --teal: #0d9488; --teal-bg: #e6f7f5;
-    --purple: #7c3aed; --purple-bg: #f2ebfe;
-    --amber: #b45309; --amber-bg: #fef3e2;
-    --green: #15803d; --green-bg: #e8f7ec;
-    --red: #b91c1c; --red-bg: #fdeaea;
-    /* Marken-Design: KH = Gelb, peax = Orange/Rot (wie auf den Rechnungsvorlagen).
-       --accent-bar ist der reine Markenfarbton (für den Header-Balken/Badges),
-       --accent-ink ist eine textlesbare Variante davon (für Links, aktive Tabs, Buttons) -
-       bei KH ist reines Gelb auf Weiß kaum lesbar, deshalb dort ein dunkleres Gold als Ink. */
-    --accent-bar: #FFEC14; --accent-ink: #92720b; --accent-bg: #fdf6d8;
+    /* Zurückhaltende Grundpalette, angelehnt an das Projektcontrolling-Tool:
+       weiße Flächen, fast schwarzer Text, wenige Grautöne, 4px Radius, kaum
+       Schatten. Farbe kommt fast ausschließlich aus der Marke (siehe unten). */
+    --bg: #ffffff; --card: #ffffff; --surface: #f6f6f6;
+    --border: #eaeaea; --border-strong: #dcdcdc;
+    --text: #1a1a1a; --muted: #8a8a8a; --muted-soft: #aaaaaa;
+    /* Semantik sparsam und entsättigt - nur dort, wo die Farbe eine Aussage
+       trägt (Abweichung, Status). Sonst bleibt alles grau. */
+    --green: #2f7d4f; --amber: #9a6b12; --red: #c0392b;
+    --tint: #f4f4f4;
+    /* Marke: KH = Gelb, peax = Orange/Rot (wie auf den Rechnungsvorlagen).
+       --accent-bar ist der reine Markenton für Flächen/Balken,
+       --accent-ink die textlesbare Variante - reines Gelb wäre auf Weiß
+       unlesbar, deshalb bei KH ein dunkleres Gold als Ink. */
+    --accent-bar: #FFEC14; --accent-ink: #8a6b06; --accent-bg: #fffbe0;
   }
-  body[data-org="peax"] { --accent-bar: #FE4700; --accent-ink: #FE4700; --accent-bg: #ffece3; }
+  body[data-org="peax"] { --accent-bar: #FF4600; --accent-ink: #FF4600; --accent-bg: #fff2ed; }
   * { box-sizing: border-box; }
-  body { margin: 6px 0 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
-  body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: 6px; background: var(--accent-bar); z-index: 100; }
-  #app { max-width: 1900px; margin: 0 auto; padding: 20px 24px 60px; }
-  header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
+  body { margin: 5px 0 0; font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 14px; -webkit-font-smoothing: antialiased; }
+  body::before { content: ""; position: fixed; top: 0; left: 0; right: 0; height: 5px; background: var(--accent-bar); z-index: 100; }
+  #app { max-width: 1900px; margin: 0 auto; padding: 22px 26px 60px; }
+  header.top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
   .brand-row { display: flex; align-items: center; gap: 14px; }
   .peax-wordmark { font-size: 26px; font-weight: 300; letter-spacing: -.5px; color: var(--text); line-height: 1; }
   .peax-wordmark .tag { display: block; font-size: 9px; font-weight: 700; letter-spacing: .06em; color: var(--muted); text-transform: uppercase; margin-top: 2px; }
-  .kh-wordmark { font-size: 17px; font-weight: 800; letter-spacing: .02em; color: var(--text); line-height: 1.05; padding-left: 10px; border-left: 6px solid var(--accent-bar); }
-  h1 { font-size: 20px; margin: 0; font-weight: 700; }
+  .kh-wordmark { font-size: 17px; font-weight: 800; letter-spacing: .02em; color: var(--text); line-height: 1.05; padding-left: 10px; border-left: 5px solid var(--accent-bar); }
+  h1 { font-size: 20px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
   .sub { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
   .userbar { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
-  nav.tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  nav.tabs button { background: none; border: none; padding: 10px 16px; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
-  nav.tabs button.active { color: var(--accent-ink); border-bottom-color: var(--accent-ink); }
-  nav.tabs button:hover { color: var(--text); }
+  nav.tabs { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  nav.tabs button { background: none; border: none; padding: 9px 14px; font-size: 14px; font-weight: 500; color: var(--muted-soft); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; border-radius: 4px 4px 0 0; }
+  nav.tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent-bar); }
+  nav.tabs button:hover { color: var(--text); background: var(--surface); }
   /* Gruppen mit Klappmenü: der Wrapper muss position:relative sein, damit das
      Menü darunter ausgerichtet wird und nicht am Seitenrand klebt. */
   .navgroup { position: relative; display: inline-flex; }
-  .navgroup > button .caret { font-size: 10px; margin-left: 5px; opacity: .7; }
-  .navgroup > button .sub { font-weight: 500; opacity: .8; }
-  .navmenu { position: absolute; top: 100%; left: 0; z-index: 50; margin-top: 1px;
-    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-    box-shadow: 0 10px 28px rgba(31, 36, 48, .13); padding: 4px; min-width: 190px;
+  .navgroup > button .caret { font-size: 10px; margin-left: 5px; opacity: .55; }
+  .navgroup > button .sub { font-weight: 400; opacity: .75; }
+  .navmenu { position: absolute; top: 100%; left: 0; z-index: 50; margin-top: 2px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 4px;
+    box-shadow: 0 2px 6px rgba(0,0,0,.05), 0 16px 36px -12px rgba(0,0,0,.18); padding: 4px; min-width: 190px;
     display: flex; flex-direction: column; }
   .navmenu button { padding: 9px 12px; text-align: left; border-bottom: none; margin-bottom: 0;
-    border-radius: 6px; white-space: nowrap; font-weight: 500; }
-  .navmenu button:hover { background: var(--bg); color: var(--text); }
-  .navmenu button.active { background: var(--accent-bg); color: var(--accent-ink); font-weight: 600; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(20,20,43,.03); }
-  .grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
+    border-radius: 4px; white-space: nowrap; font-weight: 500; color: var(--text); }
+  .navmenu button:hover { background: var(--surface); }
+  .navmenu button.active { background: var(--surface); color: var(--text); font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 16px 18px; }
+  .grid-kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 22px; }
   @media (max-width: 900px) { .grid-kpi { grid-template-columns: repeat(2, 1fr); } }
-  .kpi { border-radius: 12px; padding: 14px 16px; border: 1px solid var(--border); }
-  .kpi .label { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
-  .kpi .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .kpi .hint { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-  .kpi.blue { background: var(--blue-bg); } .kpi.blue .value { color: var(--blue); }
-  .kpi.teal { background: var(--teal-bg); } .kpi.teal .value { color: var(--teal); }
-  .kpi.purple { background: var(--purple-bg); } .kpi.purple .value { color: var(--purple); }
-  .kpi.amber { background: var(--amber-bg); } .kpi.amber .value { color: var(--amber); }
-  section.panel { margin-bottom: 22px; }
-  section.panel h2 { font-size: 15px; margin: 0 0 12px; }
+  /* Kennzahlen bewusst einheitlich statt bunt - die Zahl trägt die Information,
+     nicht die Kachelfarbe. Die Farbvarianten bleiben als Klassen bestehen,
+     damit das Markup unverändert bleibt, sehen aber alle gleich aus. */
+  .kpi { border-radius: 4px; padding: 15px 16px; border: 1px solid var(--border); background: var(--card); }
+  .kpi .label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  .kpi .value { font-size: 26px; font-weight: 700; margin-top: 6px; letter-spacing: -.02em; color: var(--text); }
+  .kpi .hint { font-size: 11.5px; color: var(--muted-soft); margin-top: 3px; }
+  .kpi.blue, .kpi.teal, .kpi.purple, .kpi.amber { background: var(--card); }
+  .kpi.blue .value, .kpi.teal .value, .kpi.purple .value, .kpi.amber .value { color: var(--text); }
+  section.panel { margin-bottom: 24px; }
+  section.panel h2 { font-size: 15px; margin: 0 0 12px; font-weight: 700; }
   .table-scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .02em; }
-  tbody tr:hover { background: #fafbff; }
+  th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; border-bottom-color: var(--border-strong); }
+  tbody tr:hover { background: var(--surface); }
   table.projekte-table { font-size: 12.5px; }
-  table.projekte-table th, table.projekte-table td { padding: 7px 8px; }
+  table.projekte-table th, table.projekte-table td { padding: 8px 8px; }
   table.projekte-table th:last-child, table.projekte-table td:last-child {
-    position: sticky; right: 0; background: var(--card); box-shadow: -6px 0 6px -6px rgba(0,0,0,.12);
+    position: sticky; right: 0; background: var(--card); box-shadow: -6px 0 6px -6px rgba(0,0,0,.08);
   }
-  table.projekte-table tbody tr:hover td:last-child { background: #fafbff; }
+  table.projekte-table tbody tr:hover td:last-child { background: var(--surface); }
   tr.inactive { opacity: .4; }
-  .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
-  .badge.Gut { background: var(--green-bg); color: var(--green); }
-  .badge.Achtung { background: var(--amber-bg); color: var(--amber); }
-  .badge.Kritisch { background: var(--red-bg); color: var(--red); }
-  .badge.Aktiv { background: var(--green-bg); color: var(--green); }
-  .badge.Pausiert { background: var(--amber-bg); color: var(--amber); }
-  .badge.Beendet { background: #eee; color: #666; }
-  .badge.Bevorstehend { background: var(--purple-bg); color: var(--purple); }
-  .badge.Perm { background: var(--blue-bg); color: var(--blue); }
-  .badge.Contract { background: #eee; color: #666; }
-  .mini-badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; margin-left: 6px; vertical-align: middle; }
-  .mini-badge.auto { background: var(--green-bg); color: var(--green); }
-  .mini-badge.manuell { background: var(--amber-bg); color: var(--amber); }
+  /* Statuskennzeichen: neutrale Fläche, die Farbe steckt nur in der Schrift und
+     nur dort, wo sie etwas bedeutet. */
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 4px; font-size: 11.5px; font-weight: 600; background: var(--tint); color: #555; }
+  .badge.Gut { color: var(--green); }
+  .badge.Achtung { color: var(--amber); }
+  .badge.Kritisch { color: var(--red); }
+  .badge.Aktiv { color: var(--green); }
+  .badge.Pausiert { color: var(--amber); }
+  .badge.Beendet { color: #999; }
+  .badge.Bevorstehend { color: #555; }
+  .badge.Perm { color: #555; }
+  .badge.Contract { color: #555; }
+  .mini-badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; margin-left: 6px; vertical-align: middle; background: var(--tint); color: #666; }
+  .mini-badge.auto { color: var(--green); }
+  .mini-badge.manuell { color: var(--amber); }
   .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
   .toolbar-filters { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: nowrap; }
   .toolbar-filters > * { flex: 0 0 auto; }
   .toolbar-filters label { white-space: nowrap; }
   .toolbar-filters select { padding: 7px 6px; }
   .toolbar-filters input[type=month] { padding: 7px 6px; }
-  select, input[type=text], input[type=number], input[type=date], input[type=month], input[type=email], input[type=password] {
-    font-size: 13px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text);
+  select, input[type=text], input[type=number], input[type=date], input[type=month], input[type=email], input[type=password], textarea {
+    font-size: 13px; padding: 8px 9px; border: 1px solid var(--border-strong); border-radius: 4px; background: #fff; color: var(--text); font-family: inherit;
   }
+  select:focus, input:focus, textarea:focus { outline: none; border-color: var(--accent-ink); }
   input.num-cell { width: 90px; padding: 5px 7px; }
-  button.btn { font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: #fff; cursor: pointer; color: var(--text); }
-  button.btn:hover { background: #f2f4f9; }
-  button.btn.primary { background: var(--accent-ink); color: #fff; border-color: var(--accent-ink); }
-  button.btn.primary:hover { filter: brightness(.9); }
-  button.btn.danger { color: var(--red); }
-  button.link { background: none; border: none; color: var(--accent-ink); font-size: 12.5px; cursor: pointer; padding: 2px 4px; font-weight: 600; }
+  button.btn { font-size: 13px; font-weight: 500; padding: 8px 16px; border-radius: 4px; border: 1px solid transparent; background: var(--surface); cursor: pointer; color: var(--text); font-family: inherit; }
+  button.btn:hover { background: #ededed; }
+  button.btn.primary { background: var(--accent-ink); color: #fff; border-color: var(--accent-ink); font-weight: 600; }
+  button.btn.primary:hover { filter: brightness(.92); }
+  button.btn.danger { color: var(--red); background: var(--card); border-color: var(--border-strong); }
+  button.btn.danger:hover { background: #fdf3f2; }
+  button.link { background: none; border: none; color: var(--accent-ink); font-size: 12.5px; cursor: pointer; padding: 2px 4px; font-weight: 600; font-family: inherit; }
+  button.link:hover { text-decoration: underline; }
   button.link.danger { color: var(--red); }
   .chart-wrap { position: relative; height: 280px; }
-  .overlay { position: fixed; inset: 0; background: rgba(20,20,43,.35); display: flex; align-items: center; justify-content: center; z-index: 50; }
-  .modal { background: #fff; border-radius: 14px; padding: 22px 24px; width: 460px; max-width: 92vw; max-height: 88vh; overflow: auto; }
-  .modal h3 { margin: 0 0 14px; font-size: 16px; }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.28); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal { background: #fff; border-radius: 4px; padding: 22px 24px; width: 460px; max-width: 92vw; max-height: 88vh; overflow: auto;
+    box-shadow: 0 2px 6px rgba(0,0,0,.05), 0 16px 36px -12px rgba(0,0,0,.25); }
+  .modal h3 { margin: 0 0 16px; font-size: 16px; font-weight: 700; }
   .field { margin-bottom: 12px; }
-  .field label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+  .field label { display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .04em; }
   .field input, .field select { width: 100%; }
   .field-row { display: flex; gap: 10px; }
   .field-row .field { flex: 1; }
-  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-  .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
-  footer.hint { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 24px; }
-  .auth-wrap { max-width: 380px; margin: 80px auto; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+  .empty { color: var(--muted-soft); font-size: 13px; padding: 18px 0; text-align: center; }
+  footer.hint { text-align: center; color: var(--muted-soft); font-size: 11.5px; margin-top: 24px; }
+  .auth-wrap { max-width: 380px; margin: 90px auto; }
   .auth-wrap h1 { text-align: center; margin-bottom: 4px; }
-  .auth-wrap p.sub { text-align: center; margin-bottom: 20px; }
+  .auth-wrap p.sub { text-align: center; margin-bottom: 22px; }
   .auth-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
   .auth-tabs button { flex: 1; }
-  .banner { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; }
-  .banner.error { background: var(--red-bg); color: var(--red); }
-  .banner.info { background: var(--blue-bg); color: var(--blue); }
+  .banner { padding: 11px 14px; border-radius: 4px; font-size: 13px; margin-bottom: 14px; background: var(--surface); color: var(--text); }
+  .banner.error { background: #fdf3f2; color: var(--red); }
+  .banner.info { background: var(--accent-bg); color: var(--text); }
   @media print {
     header.top, nav.tabs, footer.hint, .no-print { display: none !important; }
     body { background: #fff; }
+    body::before { display: none; }
     #app { max-width: none; padding: 0; }
     .card { box-shadow: none; border: 1px solid #ccc; break-inside: avoid; }
   }
@@ -276,7 +291,10 @@ let trendChart = null;
 let trendShow = { umsatz: true, kosten: true, rohertrag: true }; // steuert, welche Linien im Monatstrend gezeigt werden
 let kundeChart = null;
 // Feste Farbfolge für das Kunden-Tortendiagramm (wird bei mehr Kunden als Farben zyklisch wiederverwendet).
-const PIE_COLORS = ['#2563eb', '#0d9488', '#7c3aed', '#b45309', '#15803d', '#b91c1c', '#db2777', '#0891b2', '#65a30d', '#9333ea', '#ea580c', '#0284c7'];
+// Diagrammfarben bewusst entsättigt: eine Graustufenreihe statt zwölf kräftiger
+// Töne. Die Kunden unterscheiden sich damit über die Helligkeit, nicht über die
+// Farbe - das passt zum ruhigen Gesamtbild und bleibt auch im Ausdruck lesbar.
+const PIE_COLORS = ['#2f2f2f', '#4a4a4a', '#636363', '#7c7c7c', '#949494', '#a9a9a9', '#bcbcbc', '#cdcdcd', '#3f3f3f', '#585858', '#717171', '#8a8a8a'];
 let modalConfig = null;
 let realtimeChannel = null;
 let reportConfig = null; // { consultantId } – wenn gesetzt, wird im Provisionen-Tab die Abrechnung statt der Übersicht gezeigt
@@ -915,7 +933,6 @@ function provisionenHTML() {
 
     <div class="card panel">
       <h2>Rohertrag pro Mitarbeiter</h2>
-      <div class="empty" style="padding-top:0;text-align:left;">Rohertrag (Stunden × Marge/h) je Consultant – Basis für alle Provisionen inkl. Team-Boni. Bei geteilten Projekten (2 Consultants) wird der Rohertrag jeweils zur Hälfte angerechnet.</div>
       ${!provisionRelevant.length ? '<div class="empty">Keine provisionsberechtigten Consultants angelegt.</div>' : `
       <div class="table-scroll">
       <table>
@@ -937,7 +954,6 @@ function provisionenHTML() {
 
     <div class="card panel">
       <h2>Team-Provision</h2>
-      <div class="empty" style="padding-top:0;text-align:left;">Team-Leads bekommen einen eigenen Satz auf den IST-Rohertrag bestimmter Team-Mitglieder - je Team-Lead entweder pro Quartal oder einmal pro Jahr abgerechnet (einstellbar über "Bearbeiten" beim jeweiligen Consultant).</div>
       ${!teamLeads.length ? '<div class="empty">Kein Team-Lead angelegt.</div>' : `
       <div class="table-scroll">
       <table>
@@ -1018,7 +1034,6 @@ function renderConsultantModal(c) {
                 <input type="checkbox" class="cf_team_member" value="${x.id}" ${currentMemberIds.has(x.id) ? 'checked' : ''}> ${esc(x.name)}
               </label>`).join('') : '<span class="empty" style="padding:0;">keine anderen Consultants vorhanden</span>'}
           </div>
-          <div class="empty" style="text-align:left;padding:6px 0 0;">Eine Person kann gleichzeitig bei mehreren Team-Leads als Mitglied angehakt sein - ihr Rohertrag zählt dann unabhängig bei jedem Bonus mit.</div>
         </div>
       </div>
       <div class="modal-actions">
@@ -1178,12 +1193,7 @@ function renderContractorModal(c) {
       <div class="field">
         <label>Rechnet auch ab als (ein Name pro Zeile)</label>
         <textarea id="ctf_aliase" rows="3" style="width:100%;font-family:inherit;font-size:14px;padding:8px;border:1px solid var(--border);border-radius:8px;">${esc(aliaseVon(c.id).join('\n'))}</textarea>
-        <div style="font-size:11px;color:var(--muted);margin-top:3px;">
-          Namen, unter denen dieser Freelancer in Weclapp Rechnungen stellt – z.B. der volle Name,
-          wenn hier oben ein Kürzel steht, oder die Firmierung. Wird beim Rechnungsabgleich mitgeprüft.
-        </div>
       </div>`}
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Sobald hier eine E-Mail hinterlegt ist, kann sich die Person auf der normalen Login-Seite mit "Registrieren" selbst einen Zugang anlegen (mit genau dieser E-Mail) und sieht danach nur ihr eigenes Timesheet.</div>
       <div class="field">
         <label>Kunde / Subprojekte aus dem CRM (worauf dieser Contractor Stunden buchen darf)</label>
         <input type="text" id="ctf_picker_search" placeholder="🔍 weiteren Kunden suchen…" value="${c.pickerSearch || ''}" style="width:100%;margin-bottom:8px;">
@@ -1214,7 +1224,6 @@ function renderContractorModal(c) {
             </div>`;
           }).join('') : `<span class="empty" style="padding:0;">${search ? 'keine passenden Kunden' : 'kein passender Kunde anhand des Namens gefunden – oben nach dem Kunden suchen'}</span>`}
         </div>
-        <div class="empty" style="text-align:left;padding:6px 0 0;">Subprojekte werden im Tab "CRM" pro Kunde angelegt. Es werden nur die zum Namen passenden Kunden angezeigt - über die Suche oben findest du auch andere.</div>
       </div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDeleteContractor">Löschen</button>' : ''}
@@ -1344,7 +1353,6 @@ function timesheetsHTML() {
           </tbody>
         </table>
       </div>
-      <div class="empty" style="text-align:left;padding-top:10px;">"Link kopieren" erzeugt einen persönlichen Einladungslink mit vorausgefüllter E-Mail – einfach per WhatsApp/E-Mail/Slack an den Contractor schicken, der muss dort nur noch ein Passwort wählen. Kein separates Verschicken einer Mail über die App nötig.</div>
     </div>
     <div class="card panel">
       <h2>Timesheets</h2>
@@ -1375,7 +1383,6 @@ function timesheetsHTML() {
           </tbody>
         </table>
       </div>
-      <div class="empty" style="text-align:left;padding-top:10px;">Freigegebene Stunden zählen automatisch als IST-Stunden des jeweiligen Projekts/Monats (Tab "IST") und fließen in Umsatz, Rohertrag und Provisionen ein.</div>
     </div>
   `;
 }
@@ -1488,7 +1495,6 @@ function kundenHTML() {
         <h2 style="margin:0;">Kunden</h2>
         <button class="btn primary" id="addKundeBtn">+ Neuer Kunde</button>
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 10px;">Stammdaten pro Kunde (Anschrift, VAT-ID, Ansprechpartner, Payment Terms) – wird bei Projekten und Kandidaten per Dropdown ausgewählt statt per Freitext.</div>
       ${!data.kunden.length ? '<div class="empty">Noch keine Kunden angelegt.</div>' : `
       <div class="table-scroll">
         <table>
@@ -1513,7 +1519,6 @@ function kundenHTML() {
 
     <div class="card panel">
       <h2>Kunden-Report (Excel)</h2>
-      <div class="empty" style="text-align:left;padding:0 0 10px;">Erzeugt eine .xlsx-Datei mit allen Contractors/Projekten dieses Kunden für einen Monat - im Format des bisherigen TimesheetPortal-Exports (z.B. für Siemens). Eine Zeile pro CRM-Subprojekt, Stunden aus den freigegebenen Timesheets. Nur Kandidaten mit tatsächlich erfassten Stunden in diesem Monat erscheinen.</div>
       <div class="toolbar-filters">
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
         <select id="reportKundeSel">
@@ -1889,10 +1894,6 @@ function renderCandidateModal(c) {
             <option value="">– keiner –</option>
             ${data.contractors.map(ct => `<option value="${ct.id}" ${v.contractor_id === ct.id ? 'selected' : ''}>${esc(ct.name)}</option>`).join('')}
           </select>
-          <div style="font-size:11px;color:var(--muted);margin-top:3px;">
-            Nötig, sobald mehrere Freelancer auf demselben Projekt buchen – nur damit kann der
-            Kundenreport die Stunden der richtigen Person zuordnen.
-          </div>
         </div>`}
       </div>
       <div class="field"><label>VAT-ID Freelancer</label><input type="text" id="cd_vat_id" value="${esc(v.vat_id || '')}"></div>
@@ -1907,7 +1908,6 @@ function renderCandidateModal(c) {
         </div>
       </div>
       ${!data.kunden.length ? '<div class="empty" style="text-align:left;padding:0 0 8px;">Noch kein Kunde angelegt – im Tab "Kunden" zuerst einen Kunden anlegen.</div>' : ''}
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Konditionen, PO, Zahlungsziel usw. liegen jetzt pro Placement unten - ein Kandidat kann mehrere Placements mit unterschiedlichen Konditionen haben.</div>
 
       <h3 style="font-size:14px;margin:16px 0 8px;">Placements bei diesem Kunden</h3>
       <div id="placementsContainer">
@@ -2100,7 +2100,6 @@ function placementsHTML() {
   return `
     <div class="card panel">
       <h2>Placements – Gesamtübersicht</h2>
-      <div class="empty" style="text-align:left;padding:0 0 10px;">Alle Placements (Kandidat × Projekt) mit Konditionen, Zahlungsziel und PO-Stand - analog zur Projektliste. "Bearbeiten" öffnet den jeweiligen Kandidaten im Tab "CRM".</div>
       ${!rows.length ? '<div class="empty">Noch keine Placements angelegt.</div>' : `
       <div class="table-scroll">
         <table>
@@ -2630,9 +2629,12 @@ function setupChart() {
   const sollByMonth = months.map(m => sumEntries(entriesOf('soll').filter(e => e.month === m)));
   const labels = months.map(monthLabel);
   const trendDatasetDefs = [
-    { key: 'umsatz', label: 'Umsatz', color: '#2563eb', sollColor: '#9ca3af' },
-    { key: 'kosten', label: 'Kosten', color: '#b91c1c', sollColor: '#6b7280' },
-    { key: 'rohertrag', label: 'Rohertrag', color: '#15803d', sollColor: '#374151' },
+    // IST kräftig, SOLL blass daneben - unterschieden wird über Helligkeit,
+    // nicht über die Farbe. Rot bleibt nur für die Kosten, weil es dort eine
+    // Aussage trägt.
+    { key: 'umsatz', label: 'Umsatz', color: '#1a1a1a', sollColor: '#c8c8c8' },
+    { key: 'kosten', label: 'Kosten', color: '#c0392b', sollColor: '#e8bdb7' },
+    { key: 'rohertrag', label: 'Rohertrag', color: '#2f7d4f', sollColor: '#bcd6c6' },
   ];
 
   const ctx = document.getElementById('trendChart');
@@ -2853,12 +2855,10 @@ function renderModal() {
         <label>Projektname (optional)</label>
         <input type="text" id="f_projektname" value="${esc(v.projektname || '')}" placeholder="z.B. bei mehreren Projekten für denselben Kunden">
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Nur zur besseren Unterscheidung, falls ein Kunde mehrere Projekte gleichzeitig hat (z.B. im Tab "Timesheets"). Leer lassen, wenn nicht relevant - dann wird stattdessen einfach der Contractor-Name zur Unterscheidung angezeigt.</div>
       <div class="field">
         <label>Rechnungsname/Firma (optional)</label>
         <input type="text" id="f_rechnungsname" value="${esc(v.rechnungsname || '')}" placeholder="nur falls abweichend vom Contractor-Namen">
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Falls dieser Freelancer über eine eigene Firma abrechnet (z.B. "Muniq Design GmbH" statt Personenname), hier den Firmennamen eintragen, wie er in Weclapp als Lieferant steht - wird beim automatischen Rechnungs-Abgleich zusätzlich zum Contractor-Namen geprüft.</div>
       <div class="field-row">
         <div class="field"><label>Startdatum</label><input type="date" id="f_start" value="${v.start_date || ''}"></div>
         <div class="field"><label>Enddatum</label><input type="date" id="f_ende" value="${v.end_date || ''}"></div>
@@ -2875,7 +2875,6 @@ function renderModal() {
         </div>
       </div>
       <div class="field"><label>Deal Value (€, nur Kennzahl)</label><input type="number" step="1" id="f_dealvalue" value="${v.deal_value ?? ''}"></div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">"Bestellte Stunden" ist die insgesamt für dieses Projekt bestellte Stundenzahl (peax-Modell, statt Std./Woche). "Verbleibend" wird in der Projektliste automatisch berechnet (bestellt minus bisher erfasste IST-Stunden).</div>
       ` : `
       <div class="field-row">
         <div class="field"><label id="f_wochenstunden_label">Std./Woche</label><input type="number" step="0.5" min="0" id="f_wochenstunden" value="${v.wochenstunden}"></div>
@@ -2889,12 +2888,10 @@ function renderModal() {
       <div class="empty" id="permWochenHint" style="text-align:left;padding:0 0 8px;display:none;">Bei Perm nicht relevant (keine Stundenabrechnung) – wird beim Speichern ignoriert.</div>
       <div class="empty" id="wochenFreitextHint" style="text-align:left;padding:0 0 8px;">40 ist nur ein Vorschlag – hier frei pro Freelancer anpassbar (z.B. 20 oder 30 bei Teilzeit).</div>
       `}
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Status wird normalerweise automatisch aus Start-/Enddatum erkannt (Noch nicht aktiv / Aktiv / Beendet). "Pausiert" ist die einzige manuelle Ausnahme.</div>
       <div class="field-row">
         <div class="field"><label id="f_payH_label">Pay / h (Kosten)</label><input type="number" id="f_payH" value="${v.pay_h}"></div>
         <div class="field"><label id="f_chargeH_label">Charge / h (Umsatz)</label><input type="number" id="f_chargeH" value="${v.charge_h}"></div>
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Bei Perm: hier die volle Rechnungssumme (z.B. 15000) bei Charge eintragen – die Stundenanzahl wird automatisch auf 1 gesetzt, damit die gesamte Pauschale als Umsatz/Rohertrag gezählt wird.</div>
       <div class="field-row">
         <div class="field"><label>Consultant 1</label><select id="f_consultant1">${consultantOptionsHTML(v.consultant1_id)}</select></div>
         <div class="field"><label>Consultant 2 (optional)</label><select id="f_consultant2">${consultantOptionsHTML(v.consultant2_id)}</select></div>
@@ -2908,7 +2905,6 @@ function renderModal() {
             </label>`).join('') : '<span class="empty" style="padding:0;">noch keine Contractors angelegt (Tab "Timesheets")</span>'}
         </div>
       </div>
-      <div class="empty" style="text-align:left;padding:0 0 8px;">Nur angehakte Contractors können für dieses Projekt eigene Stunden per Timesheet einreichen (z.B. bei mehreren Freelancern auf demselben Kunden-Projekt mehrere anhaken). Neue Contractors im Tab "Timesheets" anlegen.</div>
       <div class="modal-actions">
         ${c.id ? '<button class="btn danger" id="modalDelete">Löschen</button>' : ''}
         <button class="btn" id="modalCancel">Abbrechen</button>
