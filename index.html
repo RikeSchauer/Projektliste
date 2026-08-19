@@ -2021,7 +2021,8 @@ function renderCandidateModal(c) {
       status: document.getElementById('cd_status').value,
     };
     let candidateId = c.id;
-    const neuAngelegt = [], erzeugt = [], aktualisiert = [], uebersprungen = [];
+    const neuAngelegt = [], erzeugt = [], aktualisiert = [], uebersprungen = [], ohneZugang = [];
+    let zugeordnet = 0;
     if (candidateId) {
       if (!await save(sb.from('candidates').update(payload).eq('id', candidateId), 'Kandidat')) return;
     } else {
@@ -2073,6 +2074,8 @@ function renderCandidateModal(c) {
         if (await save(sb.from('placements').update({ linked_project_id: proj.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt')) {
           pl.linked_project_id = proj.id;
           erzeugt.push(proj);
+          if (await timesheetZugangSetzen(payload.contractor_id, proj.id)) zugeordnet++;
+          else if (!payload.contractor_id) ohneZugang.push(pl.projekt_name || 'Placement ohne Namen');
         }
       }
 
@@ -2108,6 +2111,7 @@ function renderCandidateModal(c) {
           if (neuProj && await save(sb.from('placements').update({ linked_project_id: neuProj.id }).eq('id', pl.id), 'Verknüpfung Placement → Projekt')) {
             pl.linked_project_id = neuProj.id;
             erzeugt.push(neuProj);
+            if (await timesheetZugangSetzen(payload.contractor_id, neuProj.id)) zugeordnet++;
           }
         }
       }
@@ -2122,7 +2126,13 @@ function renderCandidateModal(c) {
     if (erzeugt.length || aktualisiert.length || uebersprungen.length) {
       alert(
         (erzeugt.length ? `${erzeugt.length} Projekt(e) im Tab "Projekte" angelegt.\n` : '')
+        + (zugeordnet ? `${zugeordnet} davon direkt für das Timesheet freigeschaltet.\n` : '')
         + (aktualisiert.length ? `${aktualisiert.length} Projektzeile(n) aktualisiert.\n` : '')
+        + (ohneZugang.length
+            ? `\nNoch KEIN Timesheet-Zugang für:\n• ${ohneZugang.join('\n• ')}\n`
+              + 'Beim Kandidaten ist kein Timesheet-Zugang (Contractor) hinterlegt – '
+              + 'ohne den kann der Freelancer keine Stunden buchen. Im Tab "CRM" nachtragen.\n'
+            : '')
         + (uebersprungen.length
             ? `\nNoch kein Projekt entstanden für:\n• ${uebersprungen.join('\n• ')}\n\n`
               + 'Diese Placements bleiben Entwurf. Sobald die Angaben vollständig sind, '
@@ -2206,6 +2216,19 @@ function projektAbweichungen(payload, proj) {
 // Baut die Projektzeile aus einem Placement. Bewusst ohne Zugriff auf das
 // Formular, damit dieselbe Logik sowohl beim Knopf "Projekt erzeugen" als auch
 // bei der Automatik beim Speichern verwendet werden kann.
+// Hängt das frisch erzeugte Projekt an den Timesheet-Zugang des Freelancers,
+// damit er dort sofort Stunden buchen kann. Welcher Contractor gemeint ist,
+// steht am Kandidaten (candidates.contractor_id, siehe Migration 19).
+// Die Zuordnung bleibt jederzeit im Tab "Contractors" änderbar - hier wird sie
+// nur zum Start gesetzt, nicht erzwungen.
+async function timesheetZugangSetzen(contractorId, projectId) {
+  if (!contractorId || !projectId) return false;
+  const res = await sb.from('contractor_projects')
+    .upsert({ contractor_id: contractorId, project_id: projectId }, { onConflict: 'contractor_id,project_id' });
+  if (res.error) { console.warn('Timesheet-Zuordnung fehlgeschlagen', res.error); return false; }
+  return true;
+}
+
 function projektPayloadAusPlacement(pl, org, kundeIdVal, contractor) {
   const isPerm = pl.projekttyp === 'perm';
   const payload = {
@@ -2265,6 +2288,12 @@ async function generateProjectFromPlacement(c, pl) {
     }).select().single(), 'Placement anlegen');
     if (plInserted) pl.id = plInserted.id;
   }
+  // Gleicher Weg wie beim automatischen Anlegen: Freelancer direkt fürs
+  // Timesheet freischalten, sofern am Kandidaten ein Contractor hinterlegt ist.
+  const cId = c.values ? c.values.contractor_id : null;
+  if (cId) await timesheetZugangSetzen(cId, inserted.id);
+  else alert('Projekt angelegt.\n\nEs ist noch KEIN Timesheet-Zugang hinterlegt – der Freelancer kann dafür also keine Stunden buchen. '
+    + 'Beim Kandidaten im Tab "CRM" unter "Timesheet-Zugang (Contractor)" nachtragen.');
   await loadAll();
   await syncAutoSoll(inserted);
   render();
