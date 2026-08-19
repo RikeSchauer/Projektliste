@@ -1979,6 +1979,7 @@ function renderCandidateModal(c) {
       status: document.getElementById('cd_status').value,
     };
     let candidateId = c.id;
+    const neuAngelegt = [], erzeugt = [], aktualisiert = [], uebersprungen = [];
     if (candidateId) {
       if (!await save(sb.from('candidates').update(payload).eq('id', candidateId), 'Kandidat')) return;
     } else {
@@ -2013,11 +2014,79 @@ function renderCandidateModal(c) {
           const plInserted = await save(sb.from('placements').insert(plPayload).select().single(), 'Placement');
           if (!plInserted) return;
           pl.id = plInserted.id;
+          neuAngelegt.push(pl);
+        }
+      }
+
+      // Aus jedem NEUEN Placement direkt eine Projektzeile machen, damit es ohne
+      // weiteren Handgriff im Tab "Projekte" auftaucht.
+      const org = c.id ? c.values.org : activeOrg;
+      const contractorName = payload.contractor;
+      for (const pl of neuAngelegt) {
+        const grund = placementBereitFuerProjekt(pl, org);
+        if (grund) { uebersprungen.push(`${pl.projekt_name || 'Placement ohne Namen'}: ${grund}`); continue; }
+        const projPayload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractorName);
+        const proj = await save(sb.from('projects').insert(projPayload).select().single(), 'Projekt aus Placement');
+        if (!proj) continue;
+        if (await save(sb.from('placements').update({ linked_project_id: proj.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt')) {
+          pl.linked_project_id = proj.id;
+          erzeugt.push(proj);
+        }
+      }
+
+      // Bestehende Placements: Weicht die verknüpfte Projektzeile inzwischen ab,
+      // wird nachgefragt statt stillschweigend zu überschreiben. Die Projektzeile
+      // kann im Tab "Projekte" von Hand angepasst worden sein - das darf nicht
+      // unbemerkt verlorengehen. Deshalb die Wahl: aktualisieren, ein neues
+      // Projekt anlegen (z.B. bei einer Verlängerung zu neuen Konditionen) oder
+      // alles so lassen.
+      for (const pl of c.placements) {
+        if (!pl.id || !pl.linked_project_id || neuAngelegt.includes(pl)) continue;
+        const proj = project(pl.linked_project_id);
+        if (!proj) continue;
+        const projPayload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractorName);
+        const diff = projektAbweichungen(projPayload, proj);
+        if (!diff.length) continue;
+        const wahl = await frageDialog(
+          'Placement geändert – was soll mit dem Projekt passieren?',
+          `Placement "${pl.projekt_name || 'ohne Namen'}" weicht von der verknüpften Projektzeile ab:\n\n`
+          + diff.map(d => '• ' + d).join('\n')
+          + '\n\nDer Status der Projektzeile (Aktiv/Pausiert/…) bleibt in jedem Fall unangetastet.',
+          [
+            { key: 'update', label: 'Projektzeile aktualisieren' },
+            { key: 'neu',    label: 'Neues Projekt anlegen' },
+            { key: 'nichts', label: 'Nichts ändern' },
+          ]);
+        if (wahl === 'update') {
+          if (await save(sb.from('projects').update(projPayload).eq('id', proj.id), 'Projektzeile aktualisieren')) {
+            aktualisiert.push({ ...proj, ...projPayload });
+          }
+        } else if (wahl === 'neu') {
+          const neuProj = await save(sb.from('projects').insert(projPayload).select().single(), 'Neues Projekt aus Placement');
+          if (neuProj && await save(sb.from('placements').update({ linked_project_id: neuProj.id }).eq('id', pl.id), 'Verknüpfung Placement → Projekt')) {
+            pl.linked_project_id = neuProj.id;
+            erzeugt.push(neuProj);
+          }
         }
       }
     }
     modalConfig = null;
     await loadAll();
+    // SOLL-Stunden erst nach dem Neuladen berechnen - syncAutoSoll arbeitet auf data.
+    for (const proj of erzeugt) await syncAutoSoll(proj);
+    // Auch nach einer Änderung neu verteilen - Zeitraum oder bestellte Stunden
+    // können sich geändert haben.
+    for (const proj of aktualisiert) await syncAutoSoll(proj);
+    if (erzeugt.length || aktualisiert.length || uebersprungen.length) {
+      alert(
+        (erzeugt.length ? `${erzeugt.length} Projekt(e) im Tab "Projekte" angelegt.\n` : '')
+        + (aktualisiert.length ? `${aktualisiert.length} Projektzeile(n) aktualisiert.\n` : '')
+        + (uebersprungen.length
+            ? `\nNoch kein Projekt entstanden für:\n• ${uebersprungen.join('\n• ')}\n\n`
+              + 'Diese Placements bleiben Entwurf. Sobald die Angaben vollständig sind, '
+              + 'per "Projekt erzeugen" nachholen.'
+            : ''));
+    }
   });
 }
 
@@ -2032,6 +2101,94 @@ async function deleteCandidate(id) {
 // vom übergeordneten Kandidaten, ALLE Konditionen (Zeitraum, Pay/Charge, Consultants, ...) vom
 // Placement selbst. Übernimmt bewusst NUR die Felder, die es auch in der Tabelle "projects" gibt
 // (PO/Zahlungsziel/Overrides bleiben CRM-only).
+// Kleiner Auswahldialog mit mehreren Möglichkeiten - confirm() kann nur ja/nein.
+// Gibt den Schlüssel der gewählten Möglichkeit zurück (oder null bei Abbruch).
+// Hängt bewusst am body und nicht in #app, damit ein zwischenzeitliches render()
+// ihn nicht wegräumt.
+function frageDialog(titel, text, optionen) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.style.zIndex = 200;
+    overlay.innerHTML = `
+      <div class="modal" style="width:520px;">
+        <h3>${esc(titel)}</h3>
+        <div style="font-size:13px;line-height:1.55;white-space:pre-line;">${esc(text)}</div>
+        <div class="modal-actions" style="flex-wrap:wrap;">
+          ${optionen.map((o, i) => `<button class="btn ${i === 0 ? 'primary' : ''}" data-wahl="${esc(o.key)}">${esc(o.label)}</button>`).join('')}
+        </div>
+      </div>`;
+    const fertig = (wahl) => { overlay.remove(); resolve(wahl); };
+    overlay.querySelectorAll('[data-wahl]').forEach(b => b.addEventListener('click', () => fertig(b.dataset.wahl)));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) fertig(null); });
+    document.body.appendChild(overlay);
+  });
+}
+
+// Vergleicht einen Wert aus dem Placement mit dem aus der Projektzeile. Leer,
+// null und undefined gelten als dasselbe; Zahlen werden als Zahlen verglichen,
+// damit 70 und "70" nicht als Unterschied durchgehen.
+function feldGleich(a, b) {
+  const norm = v => (v === null || v === undefined || v === '') ? null : v;
+  a = norm(a); b = norm(b);
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  const za = Number(a), zb = Number(b);
+  if (!isNaN(za) && !isNaN(zb)) return za === zb;
+  return String(a) === String(b);
+}
+
+// Welche Felder weichen zwischen Placement und verknüpfter Projektzeile ab?
+// status bleibt außen vor - der wird im Tab "Projekte" von Hand gepflegt
+// (Pausiert o.ä.) und soll nicht vom Placement überschrieben werden.
+function projektAbweichungen(payload, proj) {
+  const namen = {
+    kunde: 'Kunde', contractor: 'Contractor', projekttyp: 'Art', rechnungsname: 'Rechnungsname',
+    start_date: 'Start', end_date: 'Ende', pay_h: 'Pay/h', charge_h: 'Charge/h',
+    wochenstunden: 'Std./Woche', amount_ordered_hours: 'Bestellte Stunden', deal_value: 'Deal Value',
+    consultant1_id: 'Consultant 1', consultant2_id: 'Consultant 2', kunde_id: null,
+  };
+  const out = [];
+  for (const [feld, label] of Object.entries(namen)) {
+    if (!label) continue;
+    if (!(feld in payload)) continue;
+    if (!feldGleich(payload[feld], proj[feld])) {
+      const zeig = v => (v === null || v === undefined || v === '') ? '–'
+        : (feld.endsWith('_id') ? consultantName(v) : String(v));
+      out.push(`${label}: ${zeig(proj[feld])} → ${zeig(payload[feld])}`);
+    }
+  }
+  return out;
+}
+
+// Baut die Projektzeile aus einem Placement. Bewusst ohne Zugriff auf das
+// Formular, damit dieselbe Logik sowohl beim Knopf "Projekt erzeugen" als auch
+// bei der Automatik beim Speichern verwendet werden kann.
+function projektPayloadAusPlacement(pl, org, kundeIdVal, contractor) {
+  const isPerm = pl.projekttyp === 'perm';
+  const payload = {
+    org, projekttyp: pl.projekttyp, kunde_id: kundeIdVal, kunde: kundeName(kundeIdVal), contractor,
+    rechnungsname: pl.rechnungsname, start_date: pl.start_date, end_date: pl.end_date || (isPerm ? pl.start_date : null),
+    pay_h: pl.pay_rate, charge_h: pl.charge_rate, consultant1_id: pl.consultant1_id, consultant2_id: pl.consultant2_id,
+    status: 'Auto',
+  };
+  if (org === 'peax') { payload.amount_ordered_hours = pl.amount_ordered_hours; payload.deal_value = pl.deal_value; payload.wochenstunden = 0; }
+  else payload.wochenstunden = isPerm ? 0 : (pl.wochenstunden || 0);
+  return payload;
+}
+
+// Reicht ein Placement für eine sinnvolle Projektzeile? Ohne Startdatum kann die
+// SOLL-Berechnung nichts verteilen, ohne Sätze wären Umsatz und Marge null - so
+// eine Zeile würde im Dashboard und in den Auswertungen nur stören. Solche
+// Placements bleiben Entwurf; das Projekt lässt sich später per Knopf erzeugen.
+function placementBereitFuerProjekt(pl, org) {
+  if (!pl.start_date) return 'kein Startdatum';
+  const hatSatz = (pl.pay_rate || 0) > 0 || (pl.charge_rate || 0) > 0
+    || (org === 'peax' && ((pl.deal_value || 0) > 0 || (pl.amount_ordered_hours || 0) > 0));
+  if (!hatSatz) return 'keine Sätze hinterlegt';
+  return null; // alles da
+}
+
 async function generateProjectFromPlacement(c, pl) {
   if (pl.linked_project_id && !confirm('Für dieses Placement wurde bereits ein Projekt erzeugt. Trotzdem ein weiteres, neues Projekt anlegen?')) return;
   const org = c.id ? c.values.org : activeOrg;
@@ -2039,15 +2196,7 @@ async function generateProjectFromPlacement(c, pl) {
   if (!kundeIdVal) { alert('Bitte zuerst einen Kunden auswählen.'); return; }
   const kundeNameVal = kundeName(kundeIdVal);
   const contractor = document.getElementById('cd_contractor') ? document.getElementById('cd_contractor').value.trim() : c.values.contractor;
-  const isPerm = pl.projekttyp === 'perm';
-  const payload = {
-    org, projekttyp: pl.projekttyp, kunde_id: kundeIdVal, kunde: kundeNameVal, contractor,
-    rechnungsname: pl.rechnungsname, start_date: pl.start_date, end_date: pl.end_date || (isPerm ? pl.start_date : null),
-    pay_h: pl.pay_rate, charge_h: pl.charge_rate, consultant1_id: pl.consultant1_id, consultant2_id: pl.consultant2_id,
-    status: 'Auto',
-  };
-  if (org === 'peax') { payload.amount_ordered_hours = pl.amount_ordered_hours; payload.deal_value = pl.deal_value; payload.wochenstunden = 0; }
-  else payload.wochenstunden = isPerm ? 0 : (pl.wochenstunden || 0);
+  const payload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractor);
   const { data: inserted, error } = await sb.from('projects').insert(payload).select().single();
   if (error) { alert(error.message); return; }
   pl.linked_project_id = inserted.id;
