@@ -3184,6 +3184,13 @@ function amountLeftHours(p) {
   return round1(p.amount_ordered_hours - used);
 }
 
+// Es gibt hier bewusst KEINEN Knopf "Neues Projekt" mehr. Eine Projektzeile
+// entsteht immer aus einem Placement:
+//   KH   -> "+ Neuer Freelancer" (Schnellanlage) direkt in diesem Tab
+//   peax -> Placement im Tab "CRM", perspektivisch aus dem Projektcontrolling-Tool
+// Von Hand angelegte Projekte hätten weder Placement noch Timesheet-Zugang -
+// der Freelancer könnte keine Stunden buchen und im Kundenreport fehlte die
+// Zeile. Bestehende Projekte lassen sich weiterhin über "Bearbeiten" ändern.
 function projekteHTML() {
   const kundenOptions = Array.from(new Set(data.projects.map(p => p.kunde))).sort((a, b) => a.localeCompare(b));
   const list = filteredSortedProjects();
@@ -3196,7 +3203,6 @@ function projekteHTML() {
     </div>
     <div class="toolbar">
       ${activeOrg !== 'kh' ? '' : '<button class="btn primary" id="schnellBtn">+ Neuer Freelancer</button>'}
-        <button class="btn ${activeOrg === 'kh' ? '' : 'primary'}" id="addProjectBtn">+ Neues Projekt</button>
       <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
     </div>
     <div class="toolbar-filters">
