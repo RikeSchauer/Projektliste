@@ -2729,6 +2729,165 @@ function render() {
   if (modalConfig && modalConfig.type === 'contractor') renderContractorModal(modalConfig);
   if (modalConfig && modalConfig.type === 'candidate') renderCandidateModal(modalConfig);
   if (modalConfig && modalConfig.type === 'kunde') renderKundeModal(modalConfig);
+  if (modalConfig && modalConfig.type === 'schnell') renderSchnellanlage(modalConfig);
+}
+
+// ---------- SCHNELLANLAGE ----------
+//
+// Ein Fenster, das die ganze Kette in einem Schritt erledigt: Kunde (falls neu),
+// Freelancer, Kandidat, Placement, Projektzeile und Timesheet-Freischaltung.
+// Gedacht für die KH-Seite, wo es kein vorgelagertes Tool gibt und Projekte
+// bisher per Mail gemeldet und dann von Hand abgetippt wurden - der Weg, den
+// diese Maske ersetzt.
+function openSchnellanlage() {
+  modalConfig = { type: 'schnell', values: {
+    kunde_id: '', kunde_neu: '', name: '', email: '', projekt_name: '',
+    start_date: '', end_date: '', wochenstunden: 40, pay_rate: '', charge_rate: '',
+    consultant1_id: '', consultant2_id: '', projekttyp: 'contract',
+  } };
+  render();
+}
+
+function renderSchnellanlage(c) {
+  const v = c.values;
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+  overlay.innerHTML = `
+    <div class="modal" style="width:560px;">
+      <h3>Neuer Freelancer – Schnellanlage</h3>
+
+      <div class="field-row">
+        <div class="field"><label>Kunde (vorhanden)</label>
+          <select id="sa_kunde">
+            <option value="">– neuer Kunde –</option>
+            ${data.kunden.map(k => `<option value="${k.id}" ${v.kunde_id === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field"><label>… oder neuer Kunde</label>
+          <input type="text" id="sa_kunde_neu" value="${esc(v.kunde_neu)}" placeholder="Firmenname"></div>
+      </div>
+
+      <div class="field-row">
+        <div class="field"><label>Freelancer</label><input type="text" id="sa_name" value="${esc(v.name)}" placeholder="Vor- und Nachname"></div>
+        <div class="field"><label>E-Mail (Timesheet-Login)</label><input type="text" id="sa_email" value="${esc(v.email)}" placeholder="optional"></div>
+      </div>
+
+      <div class="field"><label>Projektname</label>
+        <input type="text" id="sa_projekt" value="${esc(v.projekt_name)}" placeholder="optional, z. B. Web Relaunch"></div>
+
+      <div class="field-row">
+        <div class="field"><label>Art</label>
+          <select id="sa_typ">
+            <option value="contract" ${v.projekttyp !== 'perm' ? 'selected' : ''}>Contract</option>
+            <option value="perm" ${v.projekttyp === 'perm' ? 'selected' : ''}>Perm (Pauschale)</option>
+          </select>
+        </div>
+        <div class="field"><label>Start</label><input type="date" id="sa_start" value="${esc(v.start_date)}"></div>
+        <div class="field"><label>Ende</label><input type="date" id="sa_ende" value="${esc(v.end_date)}"></div>
+      </div>
+
+      <div class="field-row">
+        <div class="field"><label>Std./Woche</label><input type="number" step="1" id="sa_wochen" value="${v.wochenstunden}"></div>
+        <div class="field"><label>Pay / h (Kosten)</label><input type="number" step="0.01" id="sa_pay" value="${v.pay_rate}"></div>
+        <div class="field"><label>Charge / h (Umsatz)</label><input type="number" step="0.01" id="sa_charge" value="${v.charge_rate}"></div>
+      </div>
+
+      <div class="field-row">
+        <div class="field"><label>Consultant 1</label><select id="sa_c1">${consultantOptionsHTML(v.consultant1_id)}</select></div>
+        <div class="field"><label>Consultant 2</label><select id="sa_c2">${consultantOptionsHTML(v.consultant2_id)}</select></div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn" id="saCancel">Abbrechen</button>
+        <button class="btn primary" id="saSave">Anlegen</button>
+      </div>
+    </div>`;
+  document.getElementById('app').appendChild(overlay);
+
+  const merken = () => {
+    v.kunde_id = document.getElementById('sa_kunde').value;
+    v.kunde_neu = document.getElementById('sa_kunde_neu').value;
+    v.name = document.getElementById('sa_name').value;
+    v.email = document.getElementById('sa_email').value;
+    v.projekt_name = document.getElementById('sa_projekt').value;
+    v.projekttyp = document.getElementById('sa_typ').value;
+    v.start_date = document.getElementById('sa_start').value;
+    v.end_date = document.getElementById('sa_ende').value;
+    v.wochenstunden = document.getElementById('sa_wochen').value;
+    v.pay_rate = document.getElementById('sa_pay').value;
+    v.charge_rate = document.getElementById('sa_charge').value;
+    v.consultant1_id = document.getElementById('sa_c1').value;
+    v.consultant2_id = document.getElementById('sa_c2').value;
+  };
+  overlay.querySelectorAll('input, select').forEach(el => el.addEventListener('change', merken));
+
+  document.getElementById('saCancel').addEventListener('click', () => { modalConfig = null; render(); });
+  document.getElementById('saSave').addEventListener('click', async () => {
+    merken();
+    const org = activeOrg;
+    const name = (v.name || '').trim();
+    if (!name) { alert('Bitte den Namen des Freelancers eintragen.'); return; }
+    if (!v.kunde_id && !(v.kunde_neu || '').trim()) { alert('Bitte einen Kunden auswählen oder einen neuen eintragen.'); return; }
+    if (!v.start_date) { alert('Bitte ein Startdatum eintragen – ohne das lassen sich die SOLL-Stunden nicht verteilen.'); return; }
+
+    // 1) Kunde - vorhandenen nehmen oder neu anlegen
+    let kundeId = v.kunde_id;
+    if (!kundeId) {
+      const neu = await save(sb.from('kunden').insert({ org, name: (v.kunde_neu || '').trim() }).select().single(), 'Kunde');
+      if (!neu) return;
+      kundeId = neu.id;
+    }
+
+    // 2) Contractor - vorhandenen mit gleichem Namen wiederverwenden, sonst anlegen.
+    //    Verhindert Doppel-Einträge, wenn derselbe Freelancer ein zweites Projekt bekommt.
+    let ct = data.contractors.find(x => (x.name || '').trim().toLowerCase() === name.toLowerCase());
+    if (!ct) {
+      const angelegt = await save(sb.from('contractors').insert({ org, name, email: (v.email || '').trim() || null }).select().single(), 'Contractor');
+      if (!angelegt) return;
+      ct = angelegt;
+    } else if ((v.email || '').trim() && !ct.email) {
+      await save(sb.from('contractors').update({ email: v.email.trim() }).eq('id', ct.id), 'E-Mail ergänzen', true);
+    }
+
+    // 3) Kandidat im CRM, direkt mit dem Timesheet-Zugang verknüpft
+    const kandPayload = { org, contractor: name, kunde_id: kundeId, kunde: kundeName(kundeId), status: 'Aktiv',
+      freelancer_email: (v.email || '').trim() || null };
+    if (hatContractorVerknuepfung()) kandPayload.contractor_id = ct.id;
+    const kand = await save(sb.from('candidates').insert(kandPayload).select().single(), 'Kandidat');
+    if (!kand) return;
+
+    // 4) Placement mit den Konditionen
+    const plPayload = {
+      candidate_id: kand.id, projekt_name: (v.projekt_name || '').trim() || null,
+      projekttyp: v.projekttyp, rate_unit: 'stunde',
+      start_date: v.start_date, end_date: v.end_date || null,
+      wochenstunden: Number(v.wochenstunden) || 0,
+      pay_rate: Number(v.pay_rate) || 0, charge_rate: Number(v.charge_rate) || 0,
+      consultant1_id: v.consultant1_id || null, consultant2_id: v.consultant2_id || null,
+    };
+    const pl = await save(sb.from('placements').insert(plPayload).select().single(), 'Placement');
+    if (!pl) return;
+
+    // 5) Projektzeile - dieselbe Funktion wie überall sonst
+    const projPayload = projektPayloadAusPlacement(pl, org, kundeId, name);
+    const proj = await save(sb.from('projects').insert(projPayload).select().single(), 'Projekt');
+    if (!proj) return;
+    await save(sb.from('placements').update({ linked_project_id: proj.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt', true);
+
+    // 6) Timesheet freischalten
+    const zugang = await timesheetZugangSetzen(ct.id, proj.id);
+
+    modalConfig = null;
+    await loadAll();
+    await syncAutoSoll(proj);
+    alert(`${name} ist angelegt.\n\n`
+      + `• Kunde: ${kundeName(kundeId)}\n`
+      + `• Projektzeile im Tab "Projekte" erstellt\n`
+      + `• SOLL-Stunden aus der Laufzeit berechnet\n`
+      + (zugang
+          ? '• Timesheet freigeschaltet' + ((v.email || '').trim() ? '' : ' – für den Login fehlt noch die E-Mail (Tab "Contractors")')
+          : '• Timesheet NICHT freigeschaltet – bitte im Tab "Contractors" prüfen'));
+  });
 }
 
 // ---------- DASHBOARD ----------
@@ -2973,7 +3132,8 @@ function projekteHTML() {
       ${projSearch ? '<button class="btn" id="projSearchClearBtn">✕ Suche leeren</button>' : ''}
     </div>
     <div class="toolbar">
-      <button class="btn primary" id="addProjectBtn">+ Neues Projekt</button>
+      <button class="btn primary" id="schnellBtn">+ Neuer Freelancer</button>
+        <button class="btn" id="addProjectBtn">+ Neues Projekt</button>
       <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
     </div>
     <div class="toolbar-filters">
@@ -3504,6 +3664,8 @@ async function resetKiVorschlag(id) {
 // ---------- EVENTS ----------
 
 function wireTabEvents() {
+  const schnellBtn = document.getElementById('schnellBtn');
+  if (schnellBtn) schnellBtn.addEventListener('click', openSchnellanlage);
   const addBtn = document.getElementById('addProjectBtn');
   if (addBtn) addBtn.addEventListener('click', () => openProjectModal(null));
   const recalcBtn = document.getElementById('recalcSollBtn');
