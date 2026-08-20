@@ -282,10 +282,12 @@ const NAV = [
   { key: 'ki', label: 'Eingangsrechnungen', bereich: 'eingangsrechnungen',
     badge: () => data.ki_vorschlaege.filter(v => v.status === 'pending').length },
   // Finance enthält Provisionssätze und die firmenübergreifenden Zahlen für die
-  // Bank. Das Ausblenden hier ist die Bequemlichkeit; die eigentliche Sperre
-  // sitzt in der Datenbank (sql/20_migration_rollen.sql und sql/28_migration_bereiche.sql),
-  // denn ein verstecktes Menü hält niemanden auf, der die Konsole öffnet.
-  { label: 'Finance', bereich: 'finance', nurAdmin: true, kinder: [
+  // Bank - wie jeder andere Bereich über das Häkchen steuerbar, seit Migration 30
+  // auch in der Datenbank (vorher hing es zusätzlich an der Admin-Rolle, dadurch
+  // war das Häkchen wirkungslos). Das Ausblenden hier ist die Bequemlichkeit; die
+  // eigentliche Sperre sitzt in der Datenbank, denn ein verstecktes Menü hält
+  // niemanden auf, der die Konsole öffnet.
+  { label: 'Finance', bereich: 'finance', kinder: [
     { key: 'provisionen', label: 'Provisionen' },
     { key: 'bank', label: 'Jahresübersicht SOLL' },
   ] },
@@ -438,12 +440,26 @@ function esc(v) {
 // auf null und brechen ab.
 // quiet: true unterdrückt nur das Hinweisfenster (für Schleifen, die sonst
 // dutzendfach nacheinander melden würden) - der Aufrufer meldet dann gesammelt.
+// Fehlt ein Bereich, antwortet die Datenbank mit "new row violates row-level
+// security policy" bzw. Code 42501. Damit kann niemand etwas anfangen - deshalb
+// wird genau dieser Fall in einen verständlichen Satz übersetzt. Alle anderen
+// Fehler bleiben im Wortlaut stehen, damit nichts verschleiert wird.
+function fehlerText(error) {
+  const code = error && error.code;
+  const text = (error && error.message) || '';
+  if (code === '42501' || /row-level security/i.test(text)) {
+    return 'Dafür fehlt dir die Berechtigung.\n\n'
+      + 'Die Bereiche werden unter dem Zahnrad oben rechts vergeben (nur Admins).';
+  }
+  return text;
+}
+
 async function save(query, was, quiet) {
   const res = await query;
   if (res && res.error) {
     console.error('Speichern fehlgeschlagen:', was, res.error);
     if (!quiet) {
-      alert(`"${was}" konnte nicht gespeichert werden.\n\n${res.error.message}\n\n`
+      alert(`"${was}" konnte nicht gespeichert werden.\n\n${fehlerText(res.error)}\n\n`
         + 'Die Änderung wurde NICHT übernommen. Bitte Seite neu laden und noch einmal versuchen.');
     }
     return null;
@@ -1404,7 +1420,7 @@ async function deleteContractor(id) {
 
 async function approveTimesheetAdmin(id) {
   const { error } = await sb.rpc('approve_timesheet', { p_timesheet_id: id });
-  if (error) { alert(error.message); return; }
+  if (error) { alert(fehlerText(error)); return; }
   await loadAll();
 }
 
@@ -1412,7 +1428,7 @@ async function rejectTimesheetAdmin(id) {
   const note = prompt('Grund der Ablehnung (wird dem Contractor angezeigt):');
   if (note === null) return; // abgebrochen
   const { error } = await sb.rpc('reject_timesheet', { p_timesheet_id: id, p_note: note });
-  if (error) { alert(error.message); return; }
+  if (error) { alert(fehlerText(error)); return; }
   await loadAll();
 }
 
