@@ -3210,22 +3210,75 @@ function rechteHTML() {
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Person</th><th>Firma</th>${bereiche.map(b =>
-            `<th style="text-align:center;">${esc(b.label)}</th>`).join('')}</tr></thead>
+          <thead><tr><th>Person</th><th>Firma</th><th style="text-align:center;">Admin</th>${bereiche.map(b =>
+            `<th style="text-align:center;">${esc(b.label)}</th>`).join('')}<th></th></tr></thead>
           <tbody>
-            ${zugaenge.map(ua => `<tr>
-              <td>${esc(ua.email)}${ua.role === 'admin' ? ' <span class="mini-badge auto">Admin</span>' : ''}</td>
+            ${zugaenge.map(ua => {
+              const selbst = session && session.user && session.user.email === ua.email;
+              return `<tr>
+              <td>${esc(ua.email)}${selbst ? ' <span class="mini-badge">du</span>' : ''}</td>
               <td>${esc(ua.org.toUpperCase())}</td>
+              <td style="text-align:center;"><input type="checkbox" data-adminflag="${esc(ua.email)}|${esc(ua.org)}" ${ua.role === 'admin' ? 'checked' : ''} ${selbst ? 'disabled title="Den eigenen Admin-Zugang kann man hier nicht abgeben"' : ''}></td>
               ${bereiche.map(b => `<td style="text-align:center;">${ua.role === 'admin'
                 ? '<span title="Admins sehen alles" style="color:var(--muted);">alle</span>'
                 : `<input type="checkbox" data-recht="${esc(ua.email)}|${esc(ua.org)}|${esc(b.key)}" ${hat(ua.email, ua.org, b.key) ? 'checked' : ''}>`}</td>`).join('')}
-            </tr>`).join('')}
-            ${!zugaenge.length ? `<tr><td colspan="${bereiche.length + 2}" class="empty">Keine Zugänge hinterlegt.</td></tr>` : ''}
+              <td>${selbst ? '' : `<button class="link danger" data-zugang-weg="${esc(ua.email)}|${esc(ua.org)}">Entfernen</button>`}</td>
+            </tr>`;
+            }).join('')}
+            ${!zugaenge.length ? `<tr><td colspan="${bereiche.length + 4}" class="empty">Keine Zugänge hinterlegt.</td></tr>` : ''}
           </tbody>
         </table>
       </div>
     </div>
+
+    <div class="card panel">
+      <h2>Person hinzufügen</h2>
+      <div class="toolbar-filters">
+        <input type="text" id="neuerZugangEmail" placeholder="vorname.nachname@konzepthaus-consulting.com" style="min-width:320px;">
+        <select id="neuerZugangOrg">
+          ${allowedOrgs.map(o => `<option value="${esc(o)}">${esc(ORG_LABELS[o] || o)}</option>`).join('')}
+        </select>
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:inline-flex;align-items:center;gap:5px;">
+          <input type="checkbox" id="neuerZugangAdmin"> Admin
+        </label>
+        <button class="btn primary" id="neuerZugangBtn">Freischalten</button>
+      </div>
+      <div class="empty" style="text-align:left;padding:8px 0 0;">
+        Die Person meldet sich danach selbst mit dieser Adresse an. Neue Zugänge bekommen
+        zunächst alle Bereiche – nicht Gewünschtes oben abwählen.
+      </div>
+    </div>
   `;
+}
+
+// Freischalten heißt: eine Zeile in user_access. Das Benutzerkonto legt die
+// Person selbst über die Anmeldemaske an - wir vergeben hier keine Passwörter.
+async function zugangHinzufuegen() {
+  const email = (document.getElementById('neuerZugangEmail').value || '').trim().toLowerCase();
+  const org = document.getElementById('neuerZugangOrg').value;
+  const alsAdmin = document.getElementById('neuerZugangAdmin').checked;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { alert('Bitte eine gültige E-Mail-Adresse eingeben.'); return; }
+  if ((data.userAccess || []).some(u => u.email === email && u.org === org)) {
+    alert('Diese Adresse ist für diese Firma bereits freigeschaltet.'); return;
+  }
+  if (alsAdmin && !confirm(`${email} als Admin freischalten?\n\nAdmins sehen und ändern alles in dieser Firma und können Rechte vergeben.`)) return;
+  if (!await save(sb.from('user_access').insert({ email, org, role: alsAdmin ? 'admin' : 'user' }), 'Zugang anlegen')) return;
+  await loadAll();
+}
+
+async function zugangEntfernen(email, org) {
+  if (!confirm(`Zugang für ${email} (${org.toUpperCase()}) entfernen?\n\n`
+    + 'Die Person kommt danach nicht mehr in diese Firma. Ihre Bereiche werden mit entfernt.')) return;
+  if (!await save(sb.from('user_access').delete().eq('email', email).eq('org', org), 'Zugang entfernen')) return;
+  await loadAll();
+}
+
+async function adminUmschalten(email, org, an) {
+  if (an && !confirm(`${email} zum Admin für ${org.toUpperCase()} machen?\n\n`
+    + 'Admins sehen und ändern alles in dieser Firma und können Rechte vergeben.')) { await loadAll(); return; }
+  if (!await save(sb.from('user_access').update({ role: an ? 'admin' : 'user' })
+      .eq('email', email).eq('org', org), 'Admin-Recht ändern')) { await loadAll(); return; }
+  await loadAll();
 }
 
 async function rechtSetzen(email, org, bereich, an) {
@@ -4410,6 +4463,16 @@ function wireTabEvents() {
     const [email, org, bereich] = cb.dataset.recht.split('|');
     rechtSetzen(email, org, bereich, cb.checked);
   }));
+  document.querySelectorAll('[data-adminflag]').forEach(cb => cb.addEventListener('change', () => {
+    const [email, org] = cb.dataset.adminflag.split('|');
+    adminUmschalten(email, org, cb.checked);
+  }));
+  document.querySelectorAll('[data-zugang-weg]').forEach(b => b.addEventListener('click', () => {
+    const [email, org] = b.dataset.zugangWeg.split('|');
+    zugangEntfernen(email, org);
+  }));
+  const neuerZugangBtn = document.getElementById('neuerZugangBtn');
+  if (neuerZugangBtn) neuerZugangBtn.addEventListener('click', () => zugangHinzufuegen());
 }
 
 // ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
