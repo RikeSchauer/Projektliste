@@ -2744,6 +2744,11 @@ function openSchnellanlage() {
     kunde_id: '', kunde_neu: '', name: '', email: '', projekt_name: '',
     start_date: '', end_date: '', wochenstunden: 40, pay_rate: '', charge_rate: '',
     consultant1_id: '', consultant2_id: '', projekttyp: 'contract',
+    // Freelancer: Umsatzsteuer-ID und die Firma, unter der er abrechnet
+    vat_id: '', rechnungsname: '',
+    // nur relevant, wenn ein neuer Kunde angelegt wird
+    k_strasse: '', k_plz: '', k_ort: '', k_land: '', k_vat: '', k_email: '',
+    k_ansprechpartner: '', k_payment_terms: '',
   } };
   render();
 }
@@ -2767,9 +2772,38 @@ function renderSchnellanlage(c) {
           <input type="text" id="sa_kunde_neu" value="${esc(v.kunde_neu)}" placeholder="Firmenname"></div>
       </div>
 
+      <!-- Stammdaten nur beim NEUEN Kunden. Bei einem vorhandenen sind sie schon
+           gepflegt und würden das Fenster im Normalfall unnötig aufblähen. -->
+      <div id="sa_kundenblock" style="display:${v.kunde_id ? 'none' : ''};border-left:2px solid var(--border-strong);padding-left:14px;margin-bottom:14px;">
+        <div class="ts-label" style="margin-bottom:8px;">Stammdaten des neuen Kunden</div>
+        <div class="field-row">
+          <div class="field" style="flex:2;"><label>Straße & Nr.</label><input type="text" id="sa_k_strasse" value="${esc(v.k_strasse)}"></div>
+          <div class="field"><label>PLZ</label><input type="text" id="sa_k_plz" value="${esc(v.k_plz)}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Ort</label><input type="text" id="sa_k_ort" value="${esc(v.k_ort)}"></div>
+          <div class="field"><label>Land</label><input type="text" id="sa_k_land" value="${esc(v.k_land)}"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>VAT-ID</label><input type="text" id="sa_k_vat" value="${esc(v.k_vat)}" placeholder="z. B. DE123456789"></div>
+          <div class="field"><label>Zahlungsziel</label><input type="text" id="sa_k_payment" value="${esc(v.k_payment_terms)}" placeholder="z. B. 30 Tage netto"></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label>Ansprechpartner</label><input type="text" id="sa_k_kontakt" value="${esc(v.k_ansprechpartner)}"></div>
+          <div class="field"><label>Rechnungs-E-Mail</label><input type="text" id="sa_k_email" value="${esc(v.k_email)}"></div>
+        </div>
+      </div>
+
       <div class="field-row">
         <div class="field"><label>Freelancer</label><input type="text" id="sa_name" value="${esc(v.name)}" placeholder="Vor- und Nachname"></div>
         <div class="field"><label>E-Mail (Timesheet-Login)</label><input type="text" id="sa_email" value="${esc(v.email)}" placeholder="optional"></div>
+      </div>
+
+      <div class="field-row">
+        <div class="field"><label>VAT-ID des Freelancers</label>
+          <input type="text" id="sa_vat" value="${esc(v.vat_id)}" placeholder="optional"></div>
+        <div class="field"><label>Rechnet ab als</label>
+          <input type="text" id="sa_rechnungsname" value="${esc(v.rechnungsname)}" placeholder="Firma, falls abweichend vom Namen"></div>
       </div>
 
       <div class="field"><label>Projektname</label>
@@ -2818,8 +2852,25 @@ function renderSchnellanlage(c) {
     v.charge_rate = document.getElementById('sa_charge').value;
     v.consultant1_id = document.getElementById('sa_c1').value;
     v.consultant2_id = document.getElementById('sa_c2').value;
+    v.vat_id = document.getElementById('sa_vat').value;
+    v.rechnungsname = document.getElementById('sa_rechnungsname').value;
+    v.k_strasse = document.getElementById('sa_k_strasse').value;
+    v.k_plz = document.getElementById('sa_k_plz').value;
+    v.k_ort = document.getElementById('sa_k_ort').value;
+    v.k_land = document.getElementById('sa_k_land').value;
+    v.k_vat = document.getElementById('sa_k_vat').value;
+    v.k_payment_terms = document.getElementById('sa_k_payment').value;
+    v.k_ansprechpartner = document.getElementById('sa_k_kontakt').value;
+    v.k_email = document.getElementById('sa_k_email').value;
   };
   overlay.querySelectorAll('input, select').forEach(el => el.addEventListener('change', merken));
+
+  // Stammdatenblock nur zeigen, solange kein vorhandener Kunde gewählt ist.
+  // Bewusst nur ein- und ausblenden statt neu zu zeichnen - sonst würde der
+  // Cursor beim Tippen aus dem Feld springen.
+  const kundeSel = document.getElementById('sa_kunde');
+  const kundenblock = document.getElementById('sa_kundenblock');
+  kundeSel.addEventListener('change', () => { kundenblock.style.display = kundeSel.value ? 'none' : ''; });
 
   document.getElementById('saCancel').addEventListener('click', () => { modalConfig = null; render(); });
   document.getElementById('saSave').addEventListener('click', async () => {
@@ -2833,7 +2884,14 @@ function renderSchnellanlage(c) {
     // 1) Kunde - vorhandenen nehmen oder neu anlegen
     let kundeId = v.kunde_id;
     if (!kundeId) {
-      const neu = await save(sb.from('kunden').insert({ org, name: (v.kunde_neu || '').trim() }).select().single(), 'Kunde');
+      const neu = await save(sb.from('kunden').insert({
+        org, name: (v.kunde_neu || '').trim(),
+        strasse: (v.k_strasse || '').trim() || null, plz: (v.k_plz || '').trim() || null,
+        ort: (v.k_ort || '').trim() || null, land: (v.k_land || '').trim() || null,
+        vat_id: (v.k_vat || '').trim() || null, email: (v.k_email || '').trim() || null,
+        ansprechpartner: (v.k_ansprechpartner || '').trim() || null,
+        payment_terms: (v.k_payment_terms || '').trim() || null,
+      }).select().single(), 'Kunde');
       if (!neu) return;
       kundeId = neu.id;
     }
@@ -2851,7 +2909,8 @@ function renderSchnellanlage(c) {
 
     // 3) Kandidat im CRM, direkt mit dem Timesheet-Zugang verknüpft
     const kandPayload = { org, contractor: name, kunde_id: kundeId, kunde: kundeName(kundeId), status: 'Aktiv',
-      freelancer_email: (v.email || '').trim() || null };
+      freelancer_email: (v.email || '').trim() || null,
+      vat_id: (v.vat_id || '').trim() || null };
     if (hatContractorVerknuepfung()) kandPayload.contractor_id = ct.id;
     const kand = await save(sb.from('candidates').insert(kandPayload).select().single(), 'Kandidat');
     if (!kand) return;
@@ -2860,6 +2919,10 @@ function renderSchnellanlage(c) {
     const plPayload = {
       candidate_id: kand.id, projekt_name: (v.projekt_name || '').trim() || null,
       projekttyp: v.projekttyp, rate_unit: 'stunde',
+      // Firma, unter der abgerechnet wird. Wird vom Weclapp-Abgleich mitgeprüft -
+      // hier gleich eingetragen, landen die Rechnungen später automatisch beim
+      // richtigen Projekt statt in der "kein passender Contractor"-Liste.
+      rechnungsname: (v.rechnungsname || '').trim() || null,
       start_date: v.start_date, end_date: v.end_date || null,
       wochenstunden: Number(v.wochenstunden) || 0,
       pay_rate: Number(v.pay_rate) || 0, charge_rate: Number(v.charge_rate) || 0,
@@ -3132,8 +3195,8 @@ function projekteHTML() {
       ${projSearch ? '<button class="btn" id="projSearchClearBtn">✕ Suche leeren</button>' : ''}
     </div>
     <div class="toolbar">
-      <button class="btn primary" id="schnellBtn">+ Neuer Freelancer</button>
-        <button class="btn" id="addProjectBtn">+ Neues Projekt</button>
+      ${activeOrg !== 'kh' ? '' : '<button class="btn primary" id="schnellBtn">+ Neuer Freelancer</button>'}
+        <button class="btn ${activeOrg === 'kh' ? '' : 'primary'}" id="addProjectBtn">+ Neues Projekt</button>
       <button class="btn" id="recalcSollBtn">SOLL neu berechnen (alle Projekte)</button>
     </div>
     <div class="toolbar-filters">
