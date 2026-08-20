@@ -288,9 +288,13 @@ const NAV = [
   { label: 'Finance', bereich: 'finance', nurAdmin: true, kinder: [
     { key: 'provisionen', label: 'Provisionen' },
     { key: 'bank', label: 'Jahresübersicht SOLL' },
-    { key: 'rechte', label: 'Zugriffsrechte' },
   ] },
 ];
+
+// Einstellungen stehen bewusst NICHT in der Reiterleiste: sie gehören nicht zur
+// täglichen Arbeit, sondern werden selten und gezielt aufgerufen. Erreichbar
+// über das Zahnrad in der Kopfzeile, nur für Admins.
+const EINSTELLUNGS_TABS = ['rechte'];
 
 // Bereiche der angemeldeten Person in der aktiven Firma. Kommt aus der Datenbank
 // (meine_bereiche), nicht aus dem Browser - hier wird nur angezeigt, was dort
@@ -308,6 +312,7 @@ function sichtbareNav() {
   return NAV.filter(e => (!e.nurAdmin || istAdmin) && darfBereich(e.bereich));
 }
 function darfTab(key) {
+  if (EINSTELLUNGS_TABS.includes(key)) return istAdmin;
   return sichtbareNav().some(e => e.key === key || (e.kinder || []).some(k => k.key === key));
 }
 
@@ -3112,6 +3117,7 @@ function render() {
             ${allowedOrgs.map(o => `<button class="btn ${o === activeOrg ? 'primary' : ''}" data-org-switch="${o}">${ORG_LABELS[o] || o}</button>`).join('')}
           </div>` : ''}
         <span>${esc(session.user.email)}</span>
+        ${istAdmin ? `<button class="btn ${EINSTELLUNGS_TABS.includes(activeTab) ? 'primary' : ''}" id="settingsBtn" title="Einstellungen">⚙</button>` : ''}
         <button class="btn" id="logoutBtn">Abmelden</button>
       </div>
     </header>
@@ -3119,6 +3125,11 @@ function render() {
     <div id="tab-content"></div>
   `;
   document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+  const settingsBtn = document.getElementById('settingsBtn');
+  if (settingsBtn) settingsBtn.addEventListener('click', () => {
+    activeTab = EINSTELLUNGS_TABS.includes(activeTab) ? 'dashboard' : 'rechte';
+    offenesMenu = null; render();
+  });
   app.querySelectorAll('[data-org-switch]').forEach(b => b.addEventListener('click', () => setActiveOrg(b.dataset.orgSwitch)));
   // Reiter wechseln (auch aus einem Klappmenü heraus) - dabei das Menü schließen.
   app.querySelectorAll('nav.tabs button[data-tab]').forEach(b => b.addEventListener('click', () => {
@@ -3165,18 +3176,22 @@ function render() {
 // setzt bzw. entfernt eine Zeile in benutzer_bereiche - die Sperre selbst sitzt
 // in den Regeln der Datenbank, hier wird nur verwaltet.
 function rechteHTML() {
+  if (!istAdmin) { activeTab = 'dashboard'; return dashboardHTML(); }
   const zugaenge = [...(data.userAccess || [])].sort((a, b) =>
     a.email.localeCompare(b.email) || a.org.localeCompare(b.org));
   const bereiche = [...(data.bereiche || [])].sort((a, b) => a.sortierung - b.sortierung);
   if (!bereiche.length) {
-    return `<div class="card panel"><h2>Zugriffsrechte</h2>
+    return `<div class="card panel"><h2>Einstellungen – Zugriffsrechte</h2>
       <div class="empty">Migration 28 wurde in dieser Datenbank noch nicht ausgeführt.</div></div>`;
   }
   const hat = (email, org, key) => (data.benutzerBereiche || []).some(b =>
     b.email === email && b.org === org && b.bereich === key);
   return `
     <div class="card panel">
-      <h2>Zugriffsrechte</h2>
+      <div class="toolbar" style="justify-content:space-between;">
+        <h2 style="margin:0;">Einstellungen – Zugriffsrechte</h2>
+        <button class="btn" id="settingsBackBtn">← Zurück</button>
+      </div>
       <div class="table-scroll">
         <table>
           <thead><tr><th>Person</th><th>Firma</th>${bereiche.map(b =>
@@ -4373,6 +4388,8 @@ function wireTabEvents() {
   document.querySelectorAll('[data-report-po]').forEach(b => b.addEventListener('click', () => viewPlacementPO(b.dataset.reportPo)));
   document.querySelectorAll('[data-abr-set]').forEach(b => b.addEventListener('click', () => markiereAbgerechnet(b.dataset.abrSet)));
   document.querySelectorAll('[data-abr-weg]').forEach(b => b.addEventListener('click', () => abrechnungZuruecknehmen(b.dataset.abrWeg)));
+  const settingsBackBtn = document.getElementById('settingsBackBtn');
+  if (settingsBackBtn) settingsBackBtn.addEventListener('click', () => { activeTab = 'dashboard'; render(); });
   document.querySelectorAll('[data-recht]').forEach(cb => cb.addEventListener('change', () => {
     const [email, org, bereich] = cb.dataset.recht.split('|');
     rechtSetzen(email, org, bereich, cb.checked);
