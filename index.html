@@ -1413,7 +1413,7 @@ function timesheetsHTML() {
             ${data.contractors.map(c => `<tr>
               <td>${esc(c.name)}</td>
               <td>${esc(c.email) || '<span class="empty" style="padding:0;">kein Login hinterlegt</span>'}</td>
-              <td>${data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => { const p = project(cp.project_id); return p ? p.kunde : null; }).filter(Boolean).join(', ') || '–'}</td>
+              <td>${esc(data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => { const p = project(cp.project_id); return p ? p.kunde : null; }).filter(Boolean).join(', ')) || '–'}</td>
               <td>
                 ${c.email ? `<button class="link" data-copy-invite="${c.id}">Link kopieren</button> ` : ''}
                 <button class="link" data-edit-contractor="${c.id}">Bearbeiten</button> <button class="link danger" data-del-contractor="${c.id}">Löschen</button>
@@ -1593,7 +1593,7 @@ function kundenHTML() {
           <tbody>
             ${data.kunden.map(k => `<tr>
               <td>${esc(k.name)}</td>
-              <td>${[k.strasse, [k.plz, k.ort].filter(Boolean).join(' '), k.land].filter(Boolean).join(', ') || '–'}</td>
+              <td>${esc([k.strasse, [k.plz, k.ort].filter(Boolean).join(' '), k.land].filter(Boolean).join(', ')) || '–'}</td>
               <td>${esc(k.vat_id || '–')}</td>
               <td>${esc(k.ansprechpartner || '–')}</td>
               <td>${esc(k.email || '–')}</td>
@@ -2177,7 +2177,7 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
       </div>
       <div class="field">
         <label>Zahlungsziel / Sonderregelungen</label>
-        <input type="text" id="pl_paymentterms_${k}" value="${esc(pl.payment_terms || '')}" placeholder="${kundeObj && kundeObj.payment_terms ? 'Standard laut Kunde: ' + kundeObj.payment_terms : 'z.B. 30 Tage netto, 2% Skonto bei Zahlung binnen 10 Tagen'}">
+        <input type="text" id="pl_paymentterms_${k}" value="${esc(pl.payment_terms || '')}" placeholder="${esc(kundeObj && kundeObj.payment_terms ? 'Standard laut Kunde: ' + kundeObj.payment_terms : 'z.B. 30 Tage netto, 2% Skonto bei Zahlung binnen 10 Tagen')}">
       </div>
       <div class="empty" style="text-align:left;padding:0 0 8px;">Leer lassen = Standard-Zahlungsziel des Kunden gilt (${esc(kundeObj && kundeObj.payment_terms ? kundeObj.payment_terms : 'beim Kunden noch nicht hinterlegt')}). Hier eintragen, um für dieses Placement abzuweichen.</div>
       <h4 style="font-size:12.5px;margin:10px 0 6px;color:var(--muted);text-transform:uppercase;">PO (Purchase Order)</h4>
@@ -2203,7 +2203,7 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
         <div class="field"><label>Kunde: USt-ID</label><input type="text" id="pl_kov_vat_${k}" value="${esc(pl.kunde_override_vat_id || '')}" placeholder="${esc(kundeObj && kundeObj.vat_id ? kundeObj.vat_id : '')}"></div>
         <div class="field"><label>Contractor: Rechnungs-/Mail-Adresse</label><input type="text" id="pl_civemail_${k}" value="${esc(pl.contractor_invoice_email || '')}"></div>
       </div>
-      <div class="field"><label>Kunde: Rechnungsadresse</label><input type="text" id="pl_kov_adresse_${k}" value="${esc(pl.kunde_override_adresse || '')}" placeholder="${kundeObj ? [kundeObj.strasse, [kundeObj.plz, kundeObj.ort].filter(Boolean).join(' '), kundeObj.land].filter(Boolean).join(', ') : ''}"></div>
+      <div class="field"><label>Kunde: Rechnungsadresse</label><input type="text" id="pl_kov_adresse_${k}" value="${esc(pl.kunde_override_adresse || '')}" placeholder="${esc(kundeObj ? [kundeObj.strasse, [kundeObj.plz, kundeObj.ort].filter(Boolean).join(' '), kundeObj.land].filter(Boolean).join(', ') : '')}"></div>
       <h4 style="font-size:12.5px;margin:10px 0 6px;color:var(--muted);text-transform:uppercase;">Abrechnungsstand</h4>
       <div class="empty" style="text-align:left;padding:0 0 4px;">Abgerechnet: <strong>${fmtNum(abgerechnet, 1)} Std.</strong>${poStunden != null ? ` von ${fmtNum(poStunden, 1)} Std. laut PO (Rest: ${fmtNum(rest, 1)} Std.)` : ' (keine PO-Gesamtstundenzahl hinterlegt)'} · Abgerechnetes Volumen: <strong>${fmtEUR(volumen)}</strong></div>
       ${linkedTimesheets.length ? `
@@ -3611,7 +3611,7 @@ function projekteHTML() {
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
       <select id="projFilterKundeSel">
         <option value="all">Alle</option>
-        ${kundenOptions.map(k => `<option value="${k}" ${projFilterKunde === k ? 'selected' : ''}>${k}</option>`).join('')}
+        ${kundenOptions.map(k => `<option value="${esc(k)}" ${projFilterKunde === k ? 'selected' : ''}>${esc(k)}</option>`).join('')}
       </select>
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
       <select id="projFilterStatusSel">
@@ -3959,7 +3959,7 @@ function monthEntryHTML(kind) {
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
       <select id="entryFilterKundeSel_${kind}">
         <option value="all">Alle</option>
-        ${kundenOptions.map(k => `<option value="${k}" ${filterKunde === k ? 'selected' : ''}>${k}</option>`).join('')}
+        ${kundenOptions.map(k => `<option value="${esc(k)}" ${filterKunde === k ? 'selected' : ''}>${esc(k)}</option>`).join('')}
       </select>
       <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Status:</label>
       <select id="entryFilterStatusSel_${kind}">
