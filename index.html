@@ -356,6 +356,14 @@ let kiFilterStatus = 'pending'; // 'pending' | 'approved' | 'rejected' | 'all' �
 let reportKundeId = ''; // ausgewählter Kunde für den Excel-Report im Tab "Kunden"
 let reportMonth = currentMonthStr();
 
+// Ein <input type="month"> lässt sich leeren. Ohne Prüfung landete der leere
+// Wert als month:'' in der Datenbank - so ein Eintrag taucht danach dauerhaft
+// in Monatslisten, Dashboard und Trend auf und lässt sich kaum wieder
+// zuordnen. Deshalb: leerer oder unsinniger Wert -> aktueller Monat.
+function gueltigerMonat(wert, rueckfall) {
+  return /^\d{4}-\d{2}$/.test(wert || '') ? wert : (rueckfall || currentMonthStr());
+}
+
 function currentMonthStr() {
   const d = new Date();
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
@@ -3363,6 +3371,13 @@ function monthEntryHTML(kind) {
 }
 
 async function setEntry(kind, projectId, monthVal, stunden) {
+  // Letzte Bastion gegen einen kaputten Monat: Auch wenn ein Aufrufer die
+  // Prüfung am Eingabefeld umgeht, darf hier kein Eintrag mit leerem Monat
+  // entstehen - der wäre in den Auswertungen praktisch nicht mehr zu finden.
+  if (!/^\d{4}-\d{2}$/.test(monthVal || '')) {
+    alert('Bitte zuerst einen gültigen Monat auswählen.');
+    return;
+  }
   const existing = data.entries.find(e => e.project_id === projectId && e.kind === kind && e.month === monthVal);
   if (stunden === '' || stunden === null || isNaN(stunden)) {
     if (existing && !await save(sb.from('entries').delete().eq('id', existing.id), 'Stundenwert löschen')) return;
@@ -3529,7 +3544,12 @@ function wireTabEvents() {
   if (projSearchClearBtn) projSearchClearBtn.addEventListener('click', () => { projSearch = ''; render(); });
   ['soll', 'ist'].forEach(kind => {
     const picker = document.getElementById('monthPicker_' + kind);
-    if (picker) picker.addEventListener('change', () => { if (kind === 'soll') sollMonth = picker.value; else istMonth = picker.value; render(); });
+    if (picker) picker.addEventListener('change', () => {
+      const m = gueltigerMonat(picker.value, kind === 'soll' ? sollMonth : istMonth);
+      if (m !== picker.value) picker.value = m;
+      if (kind === 'soll') sollMonth = m; else istMonth = m;
+      render();
+    });
 
     const entryFilterArtSel = document.getElementById('entryFilterArtSel_' + kind);
     if (entryFilterArtSel) entryFilterArtSel.addEventListener('change', () => { entryFilterArt[kind] = entryFilterArtSel.value; render(); });
@@ -3574,7 +3594,11 @@ function wireTabEvents() {
   document.querySelectorAll('[data-reject-ki]').forEach(b => b.addEventListener('click', () => rejectKiVorschlag(b.dataset.rejectKi)));
   document.querySelectorAll('[data-reset-ki]').forEach(b => b.addEventListener('click', () => resetKiVorschlag(b.dataset.resetKi)));
   const provPicker = document.getElementById('provMonthPicker');
-  if (provPicker) provPicker.addEventListener('change', () => { provMonth = provPicker.value; reportConfig = null; render(); });
+  if (provPicker) provPicker.addEventListener('change', () => {
+    provMonth = gueltigerMonat(provPicker.value, provMonth);
+    if (provMonth !== provPicker.value) provPicker.value = provMonth;
+    reportConfig = null; render();
+  });
   document.querySelectorAll('[data-report]').forEach(b => b.addEventListener('click', () => { reportConfig = { consultantId: b.dataset.report }; render(); }));
   const reportBack = document.querySelector('[data-report-back]');
   if (reportBack) reportBack.addEventListener('click', () => { reportConfig = null; render(); });
@@ -3621,7 +3645,11 @@ function wireTabEvents() {
   const reportKundeSel = document.getElementById('reportKundeSel');
   if (reportKundeSel) reportKundeSel.addEventListener('change', () => { reportKundeId = reportKundeSel.value; render(); });
   const reportMonthPicker = document.getElementById('reportMonthPicker');
-  if (reportMonthPicker) reportMonthPicker.addEventListener('change', () => { reportMonth = reportMonthPicker.value; render(); });
+  if (reportMonthPicker) reportMonthPicker.addEventListener('change', () => {
+    reportMonth = gueltigerMonat(reportMonthPicker.value, reportMonth);
+    if (reportMonth !== reportMonthPicker.value) reportMonthPicker.value = reportMonth;
+    render();
+  });
   const generateKundenReportBtn = document.getElementById('generateKundenReportBtn');
   if (generateKundenReportBtn) generateKundenReportBtn.addEventListener('click', () => generateKundenReport());
 }
