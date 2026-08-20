@@ -229,7 +229,7 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], placements: [], kunden: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], placements: [], kunden: [], abrechnungen: [] };
 // Contractor-Portal (externe Freelancer, die NUR ihr eigenes Timesheet sehen - siehe
 // migration_contractor_timesheets.sql). Komplett getrennt vom internen App-Zustand oben.
 let contractorProfile = null;
@@ -274,6 +274,8 @@ const NAV = [
   { key: 'placements', label: 'Placements' },
   { key: 'timesheets', label: 'Timesheets',
     badge: () => data.timesheets.filter(t => t.status === 'submitted').length },
+  { key: 'reports', label: 'Reports',
+    badge: () => reportOffeneAnzahl() },
   { key: 'ki', label: 'Eingangsrechnungen',
     badge: () => data.ki_vorschlaege.filter(v => v.status === 'pending').length },
   // Finance enthält Provisionssätze und die firmenübergreifenden Zahlen für die
@@ -353,8 +355,9 @@ let entryFilterKunde = { soll: 'all', ist: 'all' };
 let entryFilterArt = { soll: 'all', ist: 'all' };
 let entryFilterStatus = { soll: 'all', ist: 'all' };
 let kiFilterStatus = 'pending'; // 'pending' | 'approved' | 'rejected' | 'all' – Filter im Tab "Eingangsrechnungen"
-let reportKundeId = ''; // ausgewählter Kunde für den Excel-Report im Tab "Kunden"
-let reportMonth = currentMonthStr();
+let reportKundeId = ''; // '' = alle Kunden. Filter im Tab "Reports"
+let reportMonth = letzterVollerMonat();
+let reportNurOffen = false; // nur Positionen zeigen, die noch nicht abgerechnet sind
 
 // Ein <input type="month"> lässt sich leeren. Ohne Prüfung landete der leere
 // Wert als month:'' in der Datenbank - so ein Eintrag taucht danach dauerhaft
@@ -366,6 +369,17 @@ function gueltigerMonat(wert, rueckfall) {
 
 function currentMonthStr() {
   const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+
+// Der letzte abgeschlossene Kalendermonat - der Monat, für den abgerechnet wird.
+// Am 20. August ist das der Juli: der August läuft noch, da fehlen Stunden.
+// Erst auf den 1. setzen, sonst würde am 31. März ein Monat zurück beim 3. März
+// landen (den 31. Februar gibt es nicht).
+function letzterVollerMonat() {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - 1);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
 }
 
@@ -416,6 +430,9 @@ async function save(query, was, quiet) {
 }
 
 function fmtEUR(n) { return (n || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }); }
+// Rechnungsbeträge mit Cent. fmtEUR rundet auf ganze Euro - das reicht für
+// Übersichten, aber nicht für eine Zeile, die so auf die Rechnung geht.
+function fmtEUR2(n) { return (n || 0).toLocaleString('de-DE', { style: 'currency', currency: 'EUR', minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function fmtNum(n, digits) { return (n || 0).toLocaleString('de-DE', { maximumFractionDigits: digits ?? 1 }); }
 function fmtPct(n) { return ((n || 0) * 100).toLocaleString('de-DE', { maximumFractionDigits: 1 }) + '%'; }
 function fmtDate(s) { if (!s) return '–'; const [y,m,d] = s.split('-'); return `${d}.${m}.${y}`; }
@@ -1569,25 +1586,11 @@ function kundenHTML() {
         </table>
       </div>`}
     </div>
-
-    <div class="card panel">
-      <h2>Kunden-Report (Excel)</h2>
-      <div class="toolbar-filters">
-        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
-        <select id="reportKundeSel">
-          <option value="">– bitte wählen –</option>
-          ${data.kunden.map(k => `<option value="${k.id}" ${reportKundeId === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
-        </select>
-        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
-        <input type="month" id="reportMonthPicker" value="${reportMonth}">
-        <button class="btn primary" id="generateKundenReportBtn">Report generieren (.xlsx)</button>
-      </div>
-    </div>
   `;
 }
 
 // Summe der freigegebenen (approved) Timesheet-Stunden eines Projekts in einem bestimmten Monat -
-// Basis für die "Work quantity"-Spalte im Kunden-Report (siehe generateKundenReport).
+// Basis für die "Menge"-Spalte im Reports-Tab (siehe reportZeilen).
 function approvedHoursForProjectMonth(projectId, month) {
   const tsIds = new Set(data.timesheets.filter(t => t.project_id === projectId && t.month === month && t.status === 'approved').map(t => t.id));
   if (!tsIds.size) return 0;
@@ -1624,93 +1627,259 @@ function approvedContractorCount(projectId, month) {
     .map(t => t.contractor_id)).size;
 }
 
-// Baut eine Excel-Datei im Stil des bisherigen TimesheetPortal-Exports: eine Zeile pro Placement
-// mit tatsächlich erfassten (freigegebenen) Stunden im gewählten Monat. "Rate code"/"Rate
-// description" entsprechen Projektnummer/Projektname, "Placement code/description"/"PO" und
-// Pay/Charge kommen jetzt vom Placement selbst (nicht mehr vom Kandidaten - jedes Placement kann
-// eigene Konditionen haben).
-function generateKundenReport() {
-  if (!reportKundeId) { alert('Bitte zuerst einen Kunden auswählen.'); return; }
-  if (typeof XLSX === 'undefined') { alert('Die Excel-Bibliothek konnte nicht geladen werden (CDN/Internetverbindung prüfen).'); return; }
-  const k = kunde(reportKundeId);
-  const candidatesOfKunde = data.candidates.filter(cd => cd.kunde_id === reportKundeId);
-  const rows = [];
+// ---------- REPORTS (Grundlage für die Kundenrechnungen) ----------
+//
+// Aufbau wie der bisherige TimesheetPortal-Report: pro Freelancer eine Position
+// mit Menge, Satz und Betrag für einen Monat. Grundlage sind ausschließlich
+// FREIGEGEBENE Timesheets - alles andere ist noch nicht abrechenbar.
+
+function abrechnungFuer(placementId, month) {
+  return (data.abrechnungen || []).find(a => a.placement_id === placementId && a.month === month);
+}
+
+// Zeichen am Reiter: wie viele Positionen im gewählten Monat noch offen sind -
+// bewusst über ALLE Kunden, unabhängig vom eingestellten Filter.
+function reportOffeneAnzahl() {
+  if (!data.candidates.length) return 0;
+  return reportZeilen('').zeilen.filter(z => !z.abr).length;
+}
+
+// Baut die Positionen für Tabelle UND Excel-Export aus denselben Daten. Beides
+// aus einer Quelle, damit auf dem Bildschirm nie etwas anderes steht als in der
+// Datei, aus der anschließend die Rechnung geschrieben wird.
+function reportZeilen(kundeFilter) {
+  const filterId = kundeFilter === undefined ? reportKundeId : kundeFilter;
+  const zeilen = [];
   const warnungen = [];
-  candidatesOfKunde.forEach(cd => {
+  const kandidaten = filterId ? data.candidates.filter(cd => cd.kunde_id === filterId) : data.candidates;
+  kandidaten.forEach(cd => {
     placementsOf(cd.id).filter(pl => pl.linked_project_id).forEach(pl => {
       // Stunden IMMER nur die dieses einen Freelancers. Ohne Verknüpfung
       // (candidates.contractor_id) geht das nur, wenn auf dem Projekt in diesem
-      // Monat ohnehin nur eine Person gebucht hat - sonst würde die Zeile die
+      // Monat ohnehin nur eine Person gebucht hat - sonst würde die Position die
       // Stunden der Kollegen mitberechnen und der Kunde zu viel bezahlen.
-      let hours = approvedHoursForContractorMonth(pl.linked_project_id, cd.contractor_id, reportMonth);
-      if (hours === null) {
+      let stunden = approvedHoursForContractorMonth(pl.linked_project_id, cd.contractor_id, reportMonth);
+      if (stunden === null) {
         const anzahl = approvedContractorCount(pl.linked_project_id, reportMonth);
         if (anzahl > 1) {
           warnungen.push(`${cd.contractor || 'Unbenannter Kandidat'} (${pl.projekt_name || 'ohne Projektnamen'}): `
             + `${anzahl} Freelancer buchen auf dieses Projekt, aber es ist kein Timesheet-Zugang hinterlegt. `
-            + `Zeile weggelassen – bitte im Tab "CRM" den Contractor zuordnen.`);
+            + `Position weggelassen – bitte im Tab "CRM" den Contractor zuordnen.`);
           return;
         }
-        hours = approvedHoursForProjectMonth(pl.linked_project_id, reportMonth);
+        stunden = approvedHoursForProjectMonth(pl.linked_project_id, reportMonth);
       }
-      if (!hours) return; // wie im Original-Report: nur Zeilen mit tatsächlich erfassten Stunden
+      const abr = abrechnungFuer(pl.id, reportMonth);
+      // Ohne Stunden gibt es nichts abzurechnen - AUSSER die Position wurde schon
+      // fakturiert. Die muss sichtbar bleiben, sonst verschwindet eine gestellte
+      // Rechnung spurlos, wenn ihre Stunden nachträglich zurückgezogen werden.
+      if (!stunden && !abr) return;
+      const k = kunde(cd.kunde_id);
       const payRate = pl.pay_rate || 0;
       const chargeRate = pl.charge_rate || 0;
-      const consultantNames = [pl.consultant1_id, pl.consultant2_id].filter(Boolean).map(consultantName).join(' / ');
-
-      // Abrechnungsart berücksichtigen. Bisher wurde IMMER stundenbasiert
-      // gerechnet, auch wenn "Days" oder "Fixed" in der Spalte Units stand.
-      let menge = hours;
-      if (pl.rate_unit === 'pauschale') {
-        // Pauschale: die Stunden sind für die Rechnung ohne Bedeutung, es gilt
-        // der vereinbarte Festbetrag. Menge 1, damit Menge x Satz = Betrag.
-        menge = 1;
-      } else if (pl.rate_unit === 'tag') {
-        // Tagessatz: die Timesheets erfassen Stunden pro Tag, abgerechnet werden
-        // Tage. Umgerechnet wird anteilig (siehe STUNDEN_PRO_TAG) - 9,75 Stunden
-        // sind 1,22 Tage. Auf zwei Nachkommastellen gerundet, damit der Kunde
-        // Menge x Satz nachrechnen kann und dasselbe herauskommt.
-        menge = round2(hours / STUNDEN_PRO_TAG);
-      }
-      const totalPay = round2(menge * payRate);
-      const totalCharge = round2(menge * chargeRate);
-
-      rows.push({
-        'Placement code': pl.placement_code || '',
-        'Contractor name': cd.contractor || '',
-        'Client name': k ? k.name : '',
-        'Placement description': pl.placement_description || '',
-        'Work quantity': round2(menge),
-        'Rate code': pl.projekt_nummer || '',
-        'Rate description': pl.projekt_name || '',
-        'Units': pl.rate_unit === 'tag' ? 'Days' : (pl.rate_unit === 'pauschale' ? 'Fixed' : 'Hours'),
-        'Pay rate': payRate,
-        'Total pay': totalPay,
-        'Charge rate': chargeRate,
-        'Total charge': totalCharge,
-        'Margin rate': round2(chargeRate - payRate),
-        'Total margin': round2(totalCharge - totalPay),
-        'Placement consultant': consultantNames,
-        'Placement PO': pl.po_referenz || '',
-        'Placement: Purchase Order / Invoice Reference': pl.po_referenz || '',
+      // Abrechnungsart berücksichtigen: Pauschale ist ein Festbetrag (Menge 1),
+      // beim Tagessatz werden die erfassten Stunden anteilig in Tage umgerechnet
+      // (siehe STUNDEN_PRO_TAG) - 9,75 Stunden sind 1,22 Tage.
+      let menge = stunden;
+      let einheit = 'Hours';
+      if (pl.rate_unit === 'pauschale') { menge = 1; einheit = 'Fixed'; }
+      else if (pl.rate_unit === 'tag') { menge = round2(stunden / STUNDEN_PRO_TAG); einheit = 'Days'; }
+      zeilen.push({
+        placementId: pl.id,
+        kundeName: k ? k.name : 'kein Kunde zugeordnet',
+        ohneKunde: !k,
+        contractor: cd.contractor || '–',
+        projektName: pl.projekt_name || '',
+        projektNummer: pl.projekt_nummer || '',
+        placementCode: pl.placement_code || '',
+        placementBeschreibung: pl.placement_description || '',
+        stunden: round2(stunden),
+        menge: round2(menge),
+        einheit,
+        einheitLabel: einheit === 'Days' ? 'Tage' : (einheit === 'Fixed' ? 'pauschal' : 'Std.'),
+        payRate, chargeRate,
+        totalPay: round2(menge * payRate),
+        totalCharge: round2(menge * chargeRate),
+        consultants: [pl.consultant1_id, pl.consultant2_id].filter(Boolean).map(consultantName).join(' / '),
+        poReferenz: pl.po_referenz || '',
+        poPfad: pl.po_pdf_path || '',
+        poDatei: pl.po_pdf_filename || '',
+        abr,
       });
     });
   });
-  // Weggelassene Zeilen IMMER melden, bevor die Datei entsteht. Ein Report, dem
-  // stillschweigend Positionen fehlen, ist schlimmer als gar keiner - er sieht
+  zeilen.sort((a, b) => a.kundeName.localeCompare(b.kundeName) || a.contractor.localeCompare(b.contractor));
+  return { zeilen, warnungen };
+}
+
+function reportsHTML() {
+  const { zeilen, warnungen } = reportZeilen();
+  const sichtbar = reportNurOffen ? zeilen.filter(z => !z.abr) : zeilen;
+  const offen = zeilen.filter(z => !z.abr);
+  const summe = sichtbar.reduce((sum, z) => sum + z.totalCharge, 0);
+  const gewaehlterKunde = reportKundeId ? kunde(reportKundeId) : null;
+  return `
+    <div class="card panel">
+      <h2>Reports</h2>
+      <div class="toolbar-filters" style="margin-bottom:14px;">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Monat:</label>
+        <input type="month" id="reportMonthPicker" value="${reportMonth}">
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;">Kunde:</label>
+        <select id="reportKundeSel">
+          <option value="">Alle Kunden</option>
+          ${[...data.kunden].sort((a, b) => a.name.localeCompare(b.name)).map(kk =>
+            `<option value="${kk.id}" ${reportKundeId === kk.id ? 'selected' : ''}>${esc(kk.name)}</option>`).join('')}
+        </select>
+        <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:inline-flex;align-items:center;gap:5px;">
+          <input type="checkbox" id="reportNurOffenChk" ${reportNurOffen ? 'checked' : ''}> nur offene
+        </label>
+        <button class="btn" id="generateKundenReportBtn">Excel (.xlsx)</button>
+        ${gewaehlterKunde && offen.length
+          ? `<button class="btn primary" id="reportAlleAbrBtn">Alle ${offen.length} als abgerechnet markieren</button>`
+          : ''}
+      </div>
+      ${warnungen.length ? `
+      <div style="border:1px solid var(--amber);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:12.5px;color:var(--amber);">
+        <strong>${warnungen.length} Position(en) fehlen in dieser Liste:</strong>
+        <ul style="margin:6px 0 0 18px;padding:0;">${warnungen.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
+      </div>` : ''}
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>Kunde</th><th>Contractor</th><th>Projekt</th>
+            <th style="text-align:right;">Menge</th><th>Einheit</th>
+            <th style="text-align:right;">Satz</th><th style="text-align:right;">Betrag</th>
+            <th>PO</th><th>Abgerechnet</th><th></th>
+          </tr></thead>
+          <tbody>
+            ${sichtbar.map(z => {
+              // Weicht die heutige Stundenzahl von der ab, über die tatsächlich
+              // fakturiert wurde? Dann wurde nach der Rechnung noch ein Timesheet
+              // freigegeben oder zurückgezogen - das muss auffallen.
+              const abweichung = z.abr && z.abr.stunden != null && Math.abs(Number(z.abr.stunden) - z.stunden) > 0.01;
+              return `<tr>
+                <td>${z.ohneKunde ? '<span class="mini-badge manuell">kein Kunde zugeordnet</span>' : esc(z.kundeName)}</td>
+                <td>${esc(z.contractor)}</td>
+                <td>${esc(z.projektName || '–')}${z.placementCode ? ` <span style="color:var(--muted);font-size:11px;">${esc(z.placementCode)}</span>` : ''}</td>
+                <td style="text-align:right;">${fmtNum(z.menge, 2)}</td>
+                <td>${z.einheitLabel}</td>
+                <td style="text-align:right;">${fmtEUR2(z.chargeRate)}</td>
+                <td style="text-align:right;font-weight:600;">${fmtEUR2(z.totalCharge)}</td>
+                <td>${z.poReferenz ? esc(z.poReferenz) : '<span class="empty" style="padding:0;">–</span>'}${
+                  z.poPfad ? ` <button class="link" data-report-po="${esc(z.poPfad)}">PDF</button>` : ''}</td>
+                <td>${z.abr
+                  ? `<span class="mini-badge auto">${fmtDate(String(z.abr.abgerechnet_am || '').slice(0, 10))}</span>`
+                    + (z.abr.rechnungsnummer ? ` <span style="font-size:11px;">${esc(z.abr.rechnungsnummer)}</span>` : '')
+                    + (abweichung ? `<div style="color:var(--amber);font-size:11px;">abgerechnet mit ${fmtNum(z.abr.stunden, 2)} Std., aktuell ${fmtNum(z.stunden, 2)} Std.</div>` : '')
+                  : '<span class="mini-badge manuell">offen</span>'}</td>
+                <td>${z.abr
+                  ? `<button class="link danger" data-abr-weg="${z.placementId}">Zurücknehmen</button>`
+                  : `<button class="link" data-abr-set="${z.placementId}">Abgerechnet</button>`}</td>
+              </tr>`;
+            }).join('')}
+            ${!sichtbar.length ? `<tr><td colspan="10" class="empty">Keine ${reportNurOffen ? 'offenen ' : ''}Positionen für ${monthLabel(reportMonth)}.</td></tr>` : ''}
+          </tbody>
+          ${sichtbar.length ? `<tfoot><tr>
+            <td colspan="6" style="text-align:right;font-weight:600;">Summe (${sichtbar.length} Position(en))</td>
+            <td style="text-align:right;font-weight:700;">${fmtEUR2(summe)}</td>
+            <td colspan="3"></td>
+          </tr></tfoot>` : ''}
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// Vermerk setzen: Placement X ist für Monat Y an den Kunden fakturiert.
+// Stunden und Betrag werden als Momentaufnahme mitgespeichert (siehe
+// sql/26_migration_abrechnungen.sql).
+async function markiereAbgerechnet(placementId) {
+  const z = reportZeilen().zeilen.find(x => x.placementId === placementId);
+  if (!z) return;
+  const nr = prompt(`Rechnungsnummer für ${z.contractor} (${monthLabel(reportMonth)})?\n\nKann leer bleiben.`, '');
+  if (nr === null) return; // abgebrochen
+  const eintrag = {
+    placement_id: placementId, month: reportMonth,
+    rechnungsnummer: nr.trim() || null,
+    stunden: z.stunden, betrag: z.totalCharge,
+    abgerechnet_am: new Date().toISOString(),
+    abgerechnet_von: session && session.user ? session.user.email : null,
+  };
+  if (!await save(sb.from('abrechnungen').upsert(eintrag, { onConflict: 'placement_id,month' }), 'Abrechnung vermerken')) return;
+  await loadAll();
+}
+
+// Sammelvermerk für einen Kunden - eine Kundenrechnung enthält in der Regel alle
+// seine Positionen des Monats. Nur bei ausgewähltem Kunden angeboten, damit nicht
+// versehentlich mehrere Rechnungen auf einmal als gestellt gelten.
+async function markiereAlleAbgerechnet() {
+  const offen = reportZeilen().zeilen.filter(z => !z.abr);
+  if (!offen.length) return;
+  const gesamt = offen.reduce((s, z) => s + z.totalCharge, 0);
+  if (!confirm(`${offen.length} Position(en) über insgesamt ${fmtEUR2(gesamt)} für ${monthLabel(reportMonth)} als abgerechnet markieren?`)) return;
+  const nr = prompt('Rechnungsnummer (gilt für alle Positionen, kann leer bleiben)', '');
+  if (nr === null) return;
+  const jetzt = new Date().toISOString();
+  const eintraege = offen.map(z => ({
+    placement_id: z.placementId, month: reportMonth,
+    rechnungsnummer: nr.trim() || null,
+    stunden: z.stunden, betrag: z.totalCharge,
+    abgerechnet_am: jetzt,
+    abgerechnet_von: session && session.user ? session.user.email : null,
+  }));
+  if (!await save(sb.from('abrechnungen').upsert(eintraege, { onConflict: 'placement_id,month' }), 'Abrechnungen vermerken')) return;
+  await loadAll();
+}
+
+async function abrechnungZuruecknehmen(placementId) {
+  const abr = abrechnungFuer(placementId, reportMonth);
+  if (!abr) return;
+  if (!confirm(`Vermerk "abgerechnet" für ${monthLabel(reportMonth)} entfernen? Die Position gilt danach wieder als offen.`)) return;
+  if (!await save(sb.from('abrechnungen').delete().eq('id', abr.id), 'Abrechnung zurücknehmen')) return;
+  await loadAll();
+}
+
+// Excel-Datei im Aufbau des bisherigen TimesheetPortal-Reports. Exportiert genau
+// das, was in der Tabelle steht - inklusive gesetztem Kunden- und Offen-Filter.
+function generateKundenReport() {
+  if (typeof XLSX === 'undefined') { alert('Die Excel-Bibliothek konnte nicht geladen werden (CDN/Internetverbindung prüfen).'); return; }
+  const { zeilen, warnungen } = reportZeilen();
+  const sichtbar = reportNurOffen ? zeilen.filter(z => !z.abr) : zeilen;
+  // Weggelassene Positionen IMMER melden, bevor die Datei entsteht. Ein Report,
+  // dem stillschweigend Zeilen fehlen, ist schlimmer als gar keiner - er sieht
   // vollständig aus und geht so an den Kunden.
   if (warnungen.length) {
-    const weiter = confirm(
-      `${warnungen.length} Position(en) konnten nicht sicher berechnet werden und fehlen im Report:\n\n`
+    const weiter = confirm(`${warnungen.length} Position(en) konnten nicht sicher berechnet werden und fehlen im Report:\n\n`
       + warnungen.map(w => '• ' + w).join('\n\n')
       + `\n\nTrotzdem herunterladen? Der Report ist dann unvollständig.`);
     if (!weiter) return;
   }
-  if (!rows.length) { alert('Keine freigegebenen Stunden für diesen Kunden/Monat gefunden.'); return; }
+  if (!sichtbar.length) { alert('Keine Positionen für diesen Monat.'); return; }
+  const rows = sichtbar.map(z => ({
+    'Placement code': z.placementCode,
+    'Contractor name': z.contractor,
+    'Client name': z.ohneKunde ? '' : z.kundeName,
+    'Placement description': z.placementBeschreibung,
+    'Work quantity': z.menge,
+    'Rate code': z.projektNummer,
+    'Rate description': z.projektName,
+    'Units': z.einheit,
+    'Pay rate': z.payRate,
+    'Total pay': z.totalPay,
+    'Charge rate': z.chargeRate,
+    'Total charge': z.totalCharge,
+    'Margin rate': round2(z.chargeRate - z.payRate),
+    'Total margin': round2(z.totalCharge - z.totalPay),
+    'Placement consultant': z.consultants,
+    'Placement PO': z.poReferenz,
+    'Abgerechnet am': z.abr ? String(z.abr.abgerechnet_am || '').slice(0, 10) : '',
+    'Rechnungsnummer': z.abr ? (z.abr.rechnungsnummer || '') : '',
+  }));
   const ws = XLSX.utils.json_to_sheet(rows);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Report');
-  const kundeSlug = (k ? k.name : 'Kunde').replace(/[^a-z0-9]+/gi, '_');
+  const gewaehlterKunde = reportKundeId ? kunde(reportKundeId) : null;
+  const kundeSlug = (gewaehlterKunde ? gewaehlterKunde.name : 'Alle_Kunden').replace(/[^a-z0-9]+/gi, '_');
   XLSX.writeFile(wb, `Report_${kundeSlug}_${reportMonth}.xlsx`);
 }
 
@@ -2435,7 +2604,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }, { data: abrechnungen, error: e15 }] = await Promise.all([
     loadTable('projects', 'created_at'),
     loadTable('entries'),
     loadTable('consultants', 'created_at'),
@@ -2465,6 +2634,9 @@ async function loadAll() {
     // Alias-Namen für den Weclapp-Abgleich (Migration 22) - optional wie die
     // anderen neueren Tabellen.
     loadTable('contractor_aliase'),
+    // Abrechnungs-Vermerke (Migration 26) - optional wie die anderen neueren
+    // Tabellen: ohne die Migration bleibt im Reports-Tab alles "offen".
+    loadTable('abrechnungen', 'month', false),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -2478,6 +2650,7 @@ async function loadAll() {
   if (e12) console.warn('Kunden-CRM konnte nicht geladen werden (migration_kunden.sql ausgeführt?)', e12);
   if (e13) console.warn('Provisionssätze konnten nicht geladen werden (20_migration_rollen.sql ausgeführt?)', e13);
   if (e14) console.warn('Alias-Namen konnten nicht geladen werden (22_migration_contractor_aliase.sql ausgeführt?)', e14);
+  if (e15) console.warn('Abrechnungs-Vermerke konnten nicht geladen werden (26_migration_abrechnungen.sql ausgeführt?)', e15);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
@@ -2496,6 +2669,8 @@ async function loadAll() {
   data.candidates = (candidates || []).filter(cd => cd.org === activeOrg);
   const candidateIds = new Set(data.candidates.map(cd => cd.id));
   data.placements = (candidateProjects || []).filter(cp => candidateIds.has(cp.candidate_id));
+  const placementIds = new Set(data.placements.map(pl => pl.id));
+  data.abrechnungen = (abrechnungen || []).filter(a => placementIds.has(a.placement_id));
   data.kunden = (kunden || []).filter(k => k.org === activeOrg);
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   // Provisionssätze liegen seit Migration 20 in einer eigenen, nur für Admins
@@ -2575,6 +2750,7 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'placements' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'kunden' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'abrechnungen' }, () => loadAll())
     .subscribe();
 }
 
@@ -2721,6 +2897,7 @@ function render() {
   else if (activeTab === 'crm') content.innerHTML = crmHTML();
   else if (activeTab === 'placements') content.innerHTML = placementsHTML();
   else if (activeTab === 'bank') content.innerHTML = bankHTML();
+  else if (activeTab === 'reports') content.innerHTML = reportsHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
@@ -3881,8 +4058,15 @@ function wireTabEvents() {
     if (reportMonth !== reportMonthPicker.value) reportMonthPicker.value = reportMonth;
     render();
   });
+  const reportNurOffenChk = document.getElementById('reportNurOffenChk');
+  if (reportNurOffenChk) reportNurOffenChk.addEventListener('change', () => { reportNurOffen = reportNurOffenChk.checked; render(); });
   const generateKundenReportBtn = document.getElementById('generateKundenReportBtn');
   if (generateKundenReportBtn) generateKundenReportBtn.addEventListener('click', () => generateKundenReport());
+  const reportAlleAbrBtn = document.getElementById('reportAlleAbrBtn');
+  if (reportAlleAbrBtn) reportAlleAbrBtn.addEventListener('click', () => markiereAlleAbgerechnet());
+  document.querySelectorAll('[data-report-po]').forEach(b => b.addEventListener('click', () => viewPlacementPO(b.dataset.reportPo)));
+  document.querySelectorAll('[data-abr-set]').forEach(b => b.addEventListener('click', () => markiereAbgerechnet(b.dataset.abrSet)));
+  document.querySelectorAll('[data-abr-weg]').forEach(b => b.addEventListener('click', () => abrechnungZuruecknehmen(b.dataset.abrWeg)));
 }
 
 // ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
