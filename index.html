@@ -1589,12 +1589,42 @@ function kundenHTML() {
   `;
 }
 
+// Stunden-Index: die freigegebenen Stunden werden EINMAL zusammengezählt und
+// danach nachgeschlagen. Vorher lief jede einzelne Abfrage durch alle
+// Timesheet-Tage - bei einem Kunden wie Siemens mit über 40 Contractors und
+// mehreren Jahren Historie sind das je Report-Zeile ~100.000 Zeilen, und der
+// Reports-Tab hing dadurch spürbar. Der Index wird nach jedem Laden verworfen
+// (siehe loadAll), kann also nicht veralten.
+let stundenIndexCache = null;
+function stundenIndex() {
+  if (stundenIndexCache) return stundenIndexCache;
+  const proTimesheet = new Map();
+  data.timesheetDays.forEach(d => {
+    proTimesheet.set(d.timesheet_id, (proTimesheet.get(d.timesheet_id) || 0) + (Number(d.stunden) || 0));
+  });
+  const proProjekt = new Map();          // projectId                        -> Stunden
+  const proProjektMonat = new Map();     // projectId|month                  -> Stunden
+  const proContractorMonat = new Map();  // projectId|month|contractorId     -> Stunden
+  const contractorsJeMonat = new Map();  // projectId|month                  -> Set(contractorId)
+  data.timesheets.forEach(t => {
+    if (t.status !== 'approved') return;
+    const std = proTimesheet.get(t.id) || 0;
+    const pm = t.project_id + '|' + t.month;
+    proProjekt.set(t.project_id, (proProjekt.get(t.project_id) || 0) + std);
+    proProjektMonat.set(pm, (proProjektMonat.get(pm) || 0) + std);
+    const pcm = pm + '|' + t.contractor_id;
+    proContractorMonat.set(pcm, (proContractorMonat.get(pcm) || 0) + std);
+    if (!contractorsJeMonat.has(pm)) contractorsJeMonat.set(pm, new Set());
+    contractorsJeMonat.get(pm).add(t.contractor_id);
+  });
+  stundenIndexCache = { proProjekt, proProjektMonat, proContractorMonat, contractorsJeMonat };
+  return stundenIndexCache;
+}
+
 // Summe der freigegebenen (approved) Timesheet-Stunden eines Projekts in einem bestimmten Monat -
 // Basis für die "Menge"-Spalte im Reports-Tab (siehe reportZeilen).
 function approvedHoursForProjectMonth(projectId, month) {
-  const tsIds = new Set(data.timesheets.filter(t => t.project_id === projectId && t.month === month && t.status === 'approved').map(t => t.id));
-  if (!tsIds.size) return 0;
-  return data.timesheetDays.filter(d => tsIds.has(d.timesheet_id)).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+  return stundenIndex().proProjektMonat.get(projectId + '|' + month) || 0;
 }
 
 // Dasselbe, aber für EINEN bestimmten Freelancer. Für den Kundenreport ist das
@@ -1611,20 +1641,15 @@ function hatContractorVerknuepfung() {
 
 function approvedHoursForContractorMonth(projectId, contractorId, month) {
   if (!contractorId) return null;
-  const tsIds = new Set(data.timesheets.filter(t =>
-    t.project_id === projectId && t.month === month && t.status === 'approved' && t.contractor_id === contractorId
-  ).map(t => t.id));
-  if (!tsIds.size) return 0;
-  return data.timesheetDays.filter(d => tsIds.has(d.timesheet_id)).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+  return stundenIndex().proContractorMonat.get(projectId + '|' + month + '|' + contractorId) || 0;
 }
 
 // Wie viele verschiedene Freelancer haben in diesem Monat freigegebene Stunden
 // auf dem Projekt? Bei genau einem ist die Projektsumme automatisch auch dessen
 // Summe - dann darf der Report sie auch ohne Verknüpfung verwenden.
 function approvedContractorCount(projectId, month) {
-  return new Set(data.timesheets
-    .filter(t => t.project_id === projectId && t.month === month && t.status === 'approved')
-    .map(t => t.contractor_id)).size;
+  const menge = stundenIndex().contractorsJeMonat.get(projectId + '|' + month);
+  return menge ? menge.size : 0;
 }
 
 // ---------- REPORTS (Grundlage für die Kundenrechnungen) ----------
@@ -1639,9 +1664,22 @@ function abrechnungFuer(placementId, month) {
 
 // Zeichen am Reiter: wie viele Positionen im gewählten Monat noch offen sind -
 // bewusst über ALLE Kunden, unabhängig vom eingestellten Filter.
+//
+// Läuft bei JEDEM Neuzeichnen, auch auf ganz anderen Reitern. Deshalb gemerkt und
+// nur neu gerechnet, wenn sich Daten oder Monat geändert haben - sonst zahlt jeder
+// Klick irgendwo in der App für eine Zahl in Klammern.
+let offeneAnzahlCache = null;
 function reportOffeneAnzahl() {
   if (!data.candidates.length) return 0;
-  return reportZeilen('').zeilen.filter(z => !z.abr).length;
+  const index = stundenIndex();
+  if (offeneAnzahlCache && offeneAnzahlCache.index === index
+      && offeneAnzahlCache.monat === reportMonth
+      && offeneAnzahlCache.abrechnungen === data.abrechnungen) {
+    return offeneAnzahlCache.wert;
+  }
+  const wert = reportZeilen('').zeilen.filter(z => !z.abr).length;
+  offeneAnzahlCache = { index, monat: reportMonth, abrechnungen: data.abrechnungen, wert };
+  return wert;
 }
 
 // Baut die Positionen für Tabelle UND Excel-Export aus denselben Daten. Beides
@@ -1902,9 +1940,7 @@ function placementKey(pl) { return pl.id || pl._tempId; }
 // Summe der freigegebenen (approved) Timesheet-Stunden eines Projekts, egal in welchem Monat -
 // Basis für den "Abrechnungsstand" (abgerechnete Stunden gegen PO) am Placement.
 function approvedHoursForProject(projectId) {
-  const tsIds = new Set(data.timesheets.filter(t => t.project_id === projectId && t.status === 'approved').map(t => t.id));
-  if (!tsIds.size) return 0;
-  return data.timesheetDays.filter(d => tsIds.has(d.timesheet_id)).reduce((s, d) => s + (Number(d.stunden) || 0), 0);
+  return stundenIndex().proProjekt.get(projectId) || 0;
 }
 
 function openCandidateModal(id) {
@@ -2692,6 +2728,8 @@ async function loadAll() {
   (allConsultants || []).forEach(satzRein);
   data.ki_vorschlaege = kiVorschlaege || [];
   data.team_memberships = teamMemberships || [];
+  // Frische Daten -> alter Stunden-Index ist ungültig.
+  stundenIndexCache = null;
   render();
 }
 
