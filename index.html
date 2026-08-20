@@ -260,36 +260,53 @@ let bankJahr = new Date().getFullYear(); // gewähltes Jahr in der Jahresübersi
 // "badge" liefert eine Zahl, die als (n) hinter dem Namen erscheint; bei
 // Gruppen werden die Zahlen der Kinder zusammengezählt, damit nichts
 // übersehen wird, nur weil es zugeklappt ist.
+// bereich: welcher Bereich diesen Reiter freischaltet (siehe Migration 28).
+// Ohne Angabe ist der Reiter für alle sichtbar, die überhaupt Zugang zur Firma
+// haben - das Dashboard zeigt nur Zahlen aus Daten, die man ohnehin sehen darf.
 const NAV = [
   { key: 'dashboard', label: 'Dashboard' },
-  { label: 'Projekte', kinder: [
+  { label: 'Projekte', bereich: 'projektliste', kinder: [
     { key: 'projekte', label: 'Projektliste' },
     { key: 'soll', label: 'SOLL-Stunden' },
     { key: 'ist', label: 'IST-Stunden' },
   ] },
-  { label: 'CRM', kinder: [
+  { label: 'CRM', bereich: 'crm', kinder: [
     { key: 'kunden', label: 'Kunden' },
     { key: 'crm', label: 'Kandidaten' },
   ] },
-  { key: 'placements', label: 'Placements' },
-  { key: 'timesheets', label: 'Timesheets',
+  { key: 'placements', label: 'Placements', bereich: 'crm' },
+  { key: 'timesheets', label: 'Timesheets', bereich: 'timesheets',
     badge: () => data.timesheets.filter(t => t.status === 'submitted').length },
-  { key: 'reports', label: 'Reports',
+  { key: 'reports', label: 'Reports', bereich: 'reports',
     badge: () => reportOffeneAnzahl() },
-  { key: 'ki', label: 'Eingangsrechnungen',
+  { key: 'ki', label: 'Eingangsrechnungen', bereich: 'eingangsrechnungen',
     badge: () => data.ki_vorschlaege.filter(v => v.status === 'pending').length },
   // Finance enthält Provisionssätze und die firmenübergreifenden Zahlen für die
-  // Bank - nur für Admins. Das Ausblenden hier ist die Bequemlichkeit; die
-  // eigentliche Sperre sitzt in der Datenbank (siehe sql/20_migration_rollen.sql),
+  // Bank. Das Ausblenden hier ist die Bequemlichkeit; die eigentliche Sperre
+  // sitzt in der Datenbank (sql/20_migration_rollen.sql und sql/28_migration_bereiche.sql),
   // denn ein verstecktes Menü hält niemanden auf, der die Konsole öffnet.
-  { label: 'Finance', nurAdmin: true, kinder: [
+  { label: 'Finance', bereich: 'finance', nurAdmin: true, kinder: [
     { key: 'provisionen', label: 'Provisionen' },
     { key: 'bank', label: 'Jahresübersicht SOLL' },
+    { key: 'rechte', label: 'Zugriffsrechte' },
   ] },
 ];
 
+// Bereiche der angemeldeten Person in der aktiven Firma. Kommt aus der Datenbank
+// (meine_bereiche), nicht aus dem Browser - hier wird nur angezeigt, was dort
+// ohnehin gilt.
+let meineBereiche = new Set();
+
+function darfBereich(bereich) {
+  if (!bereich) return true;
+  if (istAdmin) return true;
+  return meineBereiche.has(bereich);
+}
+
 // Reiter, die diese Person tatsächlich sehen darf.
-function sichtbareNav() { return NAV.filter(e => !e.nurAdmin || istAdmin); }
+function sichtbareNav() {
+  return NAV.filter(e => (!e.nurAdmin || istAdmin) && darfBereich(e.bereich));
+}
 function darfTab(key) {
   return sichtbareNav().some(e => e.key === key || (e.kinder || []).some(k => k.key === key));
 }
@@ -2807,7 +2824,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: placementProjekte, error: e16 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }, { data: abrechnungen, error: e15 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: placementProjekte, error: e16 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }, { data: abrechnungen, error: e15 }, { data: bereicheListe, error: e17 }, { data: benutzerBereiche, error: e18 }, { data: userAccess, error: e19 }] = await Promise.all([
     loadTable('projects', 'created_at'),
     loadTable('entries'),
     loadTable('consultants', 'created_at'),
@@ -2843,6 +2860,11 @@ async function loadAll() {
     // Abrechnungs-Vermerke (Migration 26) - optional wie die anderen neueren
     // Tabellen: ohne die Migration bleibt im Reports-Tab alles "offen".
     loadTable('abrechnungen', 'month', false),
+    // Rechteverwaltung (Migration 28). Für Nicht-Admins liefert die Datenbank
+    // hier nichts zurück - der Reiter ist für sie ohnehin nicht sichtbar.
+    loadTable('bereiche', 'sortierung', true, 'key'),
+    loadTable('benutzer_bereiche', null, true, 'email'),
+    loadTable('user_access', null, true, 'email'),
   ]);
   if (e1 || e2 || e3) {
     console.error('load error', e1, e2, e3);
@@ -2858,6 +2880,10 @@ async function loadAll() {
   if (e14) console.warn('Alias-Namen konnten nicht geladen werden (22_migration_contractor_aliase.sql ausgeführt?)', e14);
   if (e15) console.warn('Abrechnungs-Vermerke konnten nicht geladen werden (26_migration_abrechnungen.sql ausgeführt?)', e15);
   if (e16) console.warn('Placement-Projekte konnten nicht geladen werden (27_migration_placement_projekte.sql ausgeführt?)', e16);
+  if (e17 || e18 || e19) console.warn('Rechteverwaltung konnte nicht geladen werden (28_migration_bereiche.sql ausgeführt?)', e17, e18, e19);
+  data.bereiche = bereicheListe || [];
+  data.benutzerBereiche = benutzerBereiche || [];
+  data.userAccess = userAccess || [];
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
@@ -2901,6 +2927,17 @@ async function loadAll() {
   (allConsultants || []).forEach(satzRein);
   data.ki_vorschlaege = kiVorschlaege || [];
   data.team_memberships = teamMemberships || [];
+  // Eigene Bereiche für die aktive Firma. Die Funktion liefert nur die eigenen
+  // Rechte - niemand sieht, wofür andere freigeschaltet sind.
+  const { data: bereicheRows, error: eBereich } = await sb.rpc('meine_bereiche');
+  if (eBereich) {
+    // Migration 28 noch nicht gelaufen: alles sichtbar lassen wie bisher, statt
+    // die Oberfläche leer zu räumen.
+    console.warn('Bereiche konnten nicht geladen werden (28_migration_bereiche.sql ausgeführt?)', eBereich);
+    meineBereiche = new Set(NAV.map(e => e.bereich).filter(Boolean));
+  } else {
+    meineBereiche = new Set((bereicheRows || []).filter(r => r.org === activeOrg).map(r => r.bereich));
+  }
   // Frische Daten -> alter Stunden-Index ist ungültig.
   stundenIndexCache = null;
   render();
@@ -3110,6 +3147,7 @@ function render() {
   else if (activeTab === 'placements') content.innerHTML = placementsHTML();
   else if (activeTab === 'bank') content.innerHTML = bankHTML();
   else if (activeTab === 'reports') content.innerHTML = reportsHTML();
+  else if (activeTab === 'rechte') content.innerHTML = rechteHTML();
 
   wireTabEvents();
   if (activeTab === 'dashboard') setupChart();
@@ -3119,6 +3157,55 @@ function render() {
   if (modalConfig && modalConfig.type === 'candidate') renderCandidateModal(modalConfig);
   if (modalConfig && modalConfig.type === 'kunde') renderKundeModal(modalConfig);
   if (modalConfig && modalConfig.type === 'schnell') renderSchnellanlage(modalConfig);
+}
+
+// ---------- ZUGRIFFSRECHTE (nur Admin, siehe sql/28_migration_bereiche.sql) ----------
+//
+// Zeigt je Person und Firma, welche Bereiche freigeschaltet sind. Das Häkchen
+// setzt bzw. entfernt eine Zeile in benutzer_bereiche - die Sperre selbst sitzt
+// in den Regeln der Datenbank, hier wird nur verwaltet.
+function rechteHTML() {
+  const zugaenge = [...(data.userAccess || [])].sort((a, b) =>
+    a.email.localeCompare(b.email) || a.org.localeCompare(b.org));
+  const bereiche = [...(data.bereiche || [])].sort((a, b) => a.sortierung - b.sortierung);
+  if (!bereiche.length) {
+    return `<div class="card panel"><h2>Zugriffsrechte</h2>
+      <div class="empty">Migration 28 wurde in dieser Datenbank noch nicht ausgeführt.</div></div>`;
+  }
+  const hat = (email, org, key) => (data.benutzerBereiche || []).some(b =>
+    b.email === email && b.org === org && b.bereich === key);
+  return `
+    <div class="card panel">
+      <h2>Zugriffsrechte</h2>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Person</th><th>Firma</th>${bereiche.map(b =>
+            `<th style="text-align:center;">${esc(b.label)}</th>`).join('')}</tr></thead>
+          <tbody>
+            ${zugaenge.map(ua => `<tr>
+              <td>${esc(ua.email)}${ua.role === 'admin' ? ' <span class="mini-badge auto">Admin</span>' : ''}</td>
+              <td>${esc(ua.org.toUpperCase())}</td>
+              ${bereiche.map(b => `<td style="text-align:center;">${ua.role === 'admin'
+                ? '<span title="Admins sehen alles" style="color:var(--muted);">alle</span>'
+                : `<input type="checkbox" data-recht="${esc(ua.email)}|${esc(ua.org)}|${esc(b.key)}" ${hat(ua.email, ua.org, b.key) ? 'checked' : ''}>`}</td>`).join('')}
+            </tr>`).join('')}
+            ${!zugaenge.length ? `<tr><td colspan="${bereiche.length + 2}" class="empty">Keine Zugänge hinterlegt.</td></tr>` : ''}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function rechtSetzen(email, org, bereich, an) {
+  if (an) {
+    if (!await save(sb.from('benutzer_bereiche').upsert({ email, org, bereich },
+        { onConflict: 'email,org,bereich' }), 'Recht vergeben')) return;
+  } else {
+    if (!await save(sb.from('benutzer_bereiche').delete()
+        .eq('email', email).eq('org', org).eq('bereich', bereich), 'Recht entziehen')) return;
+  }
+  await loadAll();
 }
 
 // ---------- SCHNELLANLAGE ----------
@@ -4286,6 +4373,10 @@ function wireTabEvents() {
   document.querySelectorAll('[data-report-po]').forEach(b => b.addEventListener('click', () => viewPlacementPO(b.dataset.reportPo)));
   document.querySelectorAll('[data-abr-set]').forEach(b => b.addEventListener('click', () => markiereAbgerechnet(b.dataset.abrSet)));
   document.querySelectorAll('[data-abr-weg]').forEach(b => b.addEventListener('click', () => abrechnungZuruecknehmen(b.dataset.abrWeg)));
+  document.querySelectorAll('[data-recht]').forEach(cb => cb.addEventListener('change', () => {
+    const [email, org, bereich] = cb.dataset.recht.split('|');
+    rechtSetzen(email, org, bereich, cb.checked);
+  }));
 }
 
 // ---------- CONTRACTOR-PORTAL (externe Freelancer, siehe migration_contractor_timesheets.sql) ----------
