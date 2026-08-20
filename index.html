@@ -229,7 +229,7 @@ let authError = '';
 let authInfo = '';
 let authBusy = false;
 
-let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], placements: [], kunden: [], abrechnungen: [] };
+let data = { projects: [], allProjects: [], entries: [], consultants: [], ki_vorschlaege: [], team_memberships: [], contractors: [], contractorProjects: [], timesheets: [], timesheetDays: [], candidates: [], placements: [], placementProjekte: [], kunden: [], abrechnungen: [] };
 // Contractor-Portal (externe Freelancer, die NUR ihr eigenes Timesheet sehen - siehe
 // migration_contractor_timesheets.sql). Komplett getrennt vom internen App-Zustand oben.
 let contractorProfile = null;
@@ -1219,17 +1219,16 @@ function renderContractorModal(c) {
   const assignedIds = c.id ? new Set(data.contractorProjects.filter(cp => cp.contractor_id === c.id).map(cp => cp.project_id)) : new Set();
   if (!c.pickerChecked) c.pickerChecked = new Set(assignedIds);
 
-  // Leaf-Elemente sind die CRM-Placements (Tabelle placements), gruppiert nach dem Kunden
-  // ihres jeweiligen Kandidaten (kunde_id, nicht mehr nach Textvergleich - vermeidet die
-  // früheren Gruppierungs-Doppler durch Tippfehler/Leerzeichen im Freitext) - nicht die
-  // Kandidaten selbst, da ein Kandidat mehrere Subprojekte beim selben Kunden haben kann.
+  // Leaf-Elemente sind die einzelnen Projekte (Tabelle placement_projekte),
+  // gruppiert nach dem Kunden ihres Kandidaten (kunde_id, nicht nach Textvergleich -
+  // vermeidet Gruppierungs-Doppler durch Tippfehler im Freitext). Seit Migration 27
+  // hängen mehrere davon unter einem Placement; gebucht wird auf jedes einzeln.
   const byKunde = new Map();
   data.placements.forEach(sp => {
     const cd = candidate(sp.candidate_id);
     if (!cd || !cd.kunde_id) return;
-    const key = cd.kunde_id;
-    if (!byKunde.has(key)) byKunde.set(key, []);
-    byKunde.get(key).push({ sp, cd });
+    if (!byKunde.has(cd.kunde_id)) byKunde.set(cd.kunde_id, []);
+    byKunde.get(cd.kunde_id).push({ sp, cd });
   });
 
   const nameNorm = (v.name || '').trim().toLowerCase();
@@ -1239,7 +1238,11 @@ function renderContractorModal(c) {
   // dazugewählt) bleiben immer sichtbar, damit eine Auswahl nicht verschwindet, sobald
   // die Suche wieder leer ist.
   const checkedKunden = new Set();
-  data.placements.forEach(sp => { if (sp.linked_project_id && c.pickerChecked.has(sp.linked_project_id)) { const cd = candidate(sp.candidate_id); if (cd && cd.kunde_id) checkedKunden.add(cd.kunde_id); } });
+  data.placements.forEach(sp => {
+    if (!sp.linked_project_id || !c.pickerChecked.has(sp.linked_project_id)) return;
+    const cd = candidate(sp.candidate_id);
+    if (cd && cd.kunde_id) checkedKunden.add(cd.kunde_id);
+  });
   // Standardmäßig (ohne Suche) nur die zu diesem Contractor passenden Kunden zeigen - nicht
   // die komplette Kundenliste der Firma. Andere Kunden findet man über die Suche.
   const defaultKunden = new Set([...suggestedKunden, ...checkedKunden]);
@@ -1282,10 +1285,10 @@ function renderContractorModal(c) {
               <div style="padding-left:26px;display:flex;flex-direction:column;gap:4px;margin-bottom:4px;">
                 ${itemsOfKunde.map(({ sp, cd }) => sp.linked_project_id ? `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;">
-                    <input type="checkbox" class="ctf_project" value="${sp.linked_project_id}" ${c.pickerChecked.has(sp.linked_project_id) ? 'checked' : ''}> ${esc(sp.projekt_name || cd.contractor)}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''}
+                    <input type="checkbox" class="ctf_project" value="${sp.linked_project_id}" ${c.pickerChecked.has(sp.linked_project_id) ? 'checked' : ''}> ${esc(placementBezeichnung(sp, cd))}
                   </label>` : `
                   <label style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:400;margin:0;color:var(--muted);" title="Im CRM erst auf 'Projekt erzeugen' klicken, bevor darauf gebucht werden kann">
-                    <input type="checkbox" disabled> ${esc(sp.projekt_name || cd.contractor)}${sp.projekt_nummer ? ' (#' + sp.projekt_nummer + ')' : ''} (noch kein Projekt erzeugt)
+                    <input type="checkbox" disabled> ${esc(placementBezeichnung(sp, cd))} (noch kein Projekt erzeugt)
                   </label>`).join('')}
               </div>` : ''}
             </div>`;
@@ -1473,6 +1476,24 @@ function candidate(id) { return data.candidates.find(cd => cd.id === id); }
 // Konditionen). Tabellenname in Supabase ist weiterhin "placements".
 function placement(id) { return data.placements.find(p => p.id === id); }
 function placementsOf(candidateId) { return data.placements.filter(p => p.candidate_id === candidateId); }
+// Die Projekte eines Placements (Migration 27). Ein Placement trägt die Konditionen
+// des Freelancers, die Projekte darunter sind das, was einzeln im Timesheet erfasst
+// und einzeln abgerechnet wird. Im Timesheet-Portal-Export von Siemens heißt die
+// Projektnummer "Rate code" - dieselbe Sache, nur deren Wort dafür.
+function projekteVon(placementId) { return (data.placementProjekte || []).filter(pp => pp.placement_id === placementId); }
+// Anzeigename eines Placements: die Projekte darunter, sonst der Name des
+// Freelancers. Die alten Felder placements.projekt_name/_nummer sind seit
+// Migration 27 leer und werden nicht mehr gelesen.
+function placementBezeichnung(pl, cd) {
+  const rc = projekteVon(pl.id);
+  if (!rc.length) return (cd && cd.contractor) || '(ohne Namen)';
+  return rc.map(pp => (pp.projekt_name || '(ohne Namen)') + (pp.projekt_nummer ? ' #' + pp.projekt_nummer : '')).join(', ');
+}
+function ppKey(pp) { return pp.id || pp._tempId; }
+function blankPlacementProjekt() {
+  return { id: null, _tempId: 'pp-' + Math.random().toString(36).slice(2),
+           projekt_name: '', projekt_nummer: '' };
+}
 function candidateProjectsOf(candidateId) { return placementsOf(candidateId); } // Alias, falls noch irgendwo referenziert
 
 // ---------- CRM (Kunden-Stammdaten: Anschrift, VAT-ID, Ansprechpartner, Payment Terms) ----------
@@ -1606,6 +1627,7 @@ function stundenIndex() {
   const proProjektMonat = new Map();     // projectId|month                  -> Stunden
   const proContractorMonat = new Map();  // projectId|month|contractorId     -> Stunden
   const contractorsJeMonat = new Map();  // projectId|month                  -> Set(contractorId)
+  const proRateCode = new Map();         // projectId|month|contractorId|rateCodeId -> Stunden
   data.timesheets.forEach(t => {
     if (t.status !== 'approved') return;
     const std = proTimesheet.get(t.id) || 0;
@@ -1614,10 +1636,16 @@ function stundenIndex() {
     proProjektMonat.set(pm, (proProjektMonat.get(pm) || 0) + std);
     const pcm = pm + '|' + t.contractor_id;
     proContractorMonat.set(pcm, (proContractorMonat.get(pcm) || 0) + std);
+    // Zusätzlich je Projekt: die Projektzeile bekommt die Gesamtstunden, der
+    // Report braucht sie aufgeteilt nach Kostenstelle.
+    if (t.placement_projekt_id) {
+      const rc = pcm + '|' + t.placement_projekt_id;
+      proRateCode.set(rc, (proRateCode.get(rc) || 0) + std);
+    }
     if (!contractorsJeMonat.has(pm)) contractorsJeMonat.set(pm, new Set());
     contractorsJeMonat.get(pm).add(t.contractor_id);
   });
-  stundenIndexCache = { proProjekt, proProjektMonat, proContractorMonat, contractorsJeMonat };
+  stundenIndexCache = { proProjekt, proProjektMonat, proContractorMonat, contractorsJeMonat, proRateCode };
   return stundenIndexCache;
 }
 
@@ -1639,9 +1667,13 @@ function hatContractorVerknuepfung() {
   return !data.candidates.length || Object.prototype.hasOwnProperty.call(data.candidates[0], 'contractor_id');
 }
 
-function approvedHoursForContractorMonth(projectId, contractorId, month) {
+// rateCodeId gesetzt = nur die Stunden dieser einen Kostenstelle. Ohne Angabe die
+// Summe über alle Kostenstellen des Projekts (so wie die Projektzeile sie führt).
+function approvedHoursForContractorMonth(projectId, contractorId, month, rateCodeId) {
   if (!contractorId) return null;
-  return stundenIndex().proContractorMonat.get(projectId + '|' + month + '|' + contractorId) || 0;
+  const basis = projectId + '|' + month + '|' + contractorId;
+  if (rateCodeId) return stundenIndex().proRateCode.get(basis + '|' + rateCodeId) || 0;
+  return stundenIndex().proContractorMonat.get(basis) || 0;
 }
 
 // Wie viele verschiedene Freelancer haben in diesem Monat freigegebene Stunden
@@ -1658,8 +1690,10 @@ function approvedContractorCount(projectId, month) {
 // mit Menge, Satz und Betrag für einen Monat. Grundlage sind ausschließlich
 // FREIGEGEBENE Timesheets - alles andere ist noch nicht abrechenbar.
 
-function abrechnungFuer(placementId, month) {
-  return (data.abrechnungen || []).find(a => a.placement_id === placementId && a.month === month);
+// Ein Placement hat mehrere Projekte und damit mehrere Rechnungspositionen pro
+// Monat - der Vermerk hängt deshalb am einzelnen Projekt, nicht am Placement.
+function abrechnungFuer(projektEintragId, month) {
+  return (data.abrechnungen || []).find(a => a.placement_projekt_id === projektEintragId && a.month === month);
 }
 
 // Zeichen am Reiter: wie viele Positionen im gewählten Monat noch offen sind -
@@ -1691,23 +1725,30 @@ function reportZeilen(kundeFilter) {
   const warnungen = [];
   const kandidaten = filterId ? data.candidates.filter(cd => cd.kunde_id === filterId) : data.candidates;
   kandidaten.forEach(cd => {
+    // Eine Rechnungsposition je Projekt - die Konditionen kommen vom
+    // Placement darüber. Bei Siemens hat eine Person mehrere Kostenstellen und
+    // damit mehrere Positionen im selben Monat, alle zu demselben Satz.
     placementsOf(cd.id).filter(pl => pl.linked_project_id).forEach(pl => {
+    const rateCodes = projekteVon(pl.id);
+    (rateCodes.length ? rateCodes : [null]).forEach(pp => {
       // Stunden IMMER nur die dieses einen Freelancers. Ohne Verknüpfung
       // (candidates.contractor_id) geht das nur, wenn auf dem Projekt in diesem
       // Monat ohnehin nur eine Person gebucht hat - sonst würde die Position die
       // Stunden der Kollegen mitberechnen und der Kunde zu viel bezahlen.
-      let stunden = approvedHoursForContractorMonth(pl.linked_project_id, cd.contractor_id, reportMonth);
+      let stunden = approvedHoursForContractorMonth(pl.linked_project_id, cd.contractor_id, reportMonth, pp ? pp.id : null);
       if (stunden === null) {
         const anzahl = approvedContractorCount(pl.linked_project_id, reportMonth);
         if (anzahl > 1) {
-          warnungen.push(`${cd.contractor || 'Unbenannter Kandidat'} (${pl.projekt_name || 'ohne Projektnamen'}): `
+          warnungen.push(`${cd.contractor || 'Unbenannter Kandidat'} (${(pp && pp.projekt_name) || 'ohne Projektnamen'}): `
             + `${anzahl} Freelancer buchen auf dieses Projekt, aber es ist kein Timesheet-Zugang hinterlegt. `
             + `Position weggelassen – bitte im Tab "CRM" den Contractor zuordnen.`);
           return;
         }
-        stunden = approvedHoursForProjectMonth(pl.linked_project_id, reportMonth);
+        // Ohne Timesheet-Zugang lässt sich nicht nach Projekt trennen - dann
+        // zählt die Position die Gesamtstunden des Projekts, wie bisher.
+        stunden = rateCodes.length > 1 ? 0 : approvedHoursForProjectMonth(pl.linked_project_id, reportMonth);
       }
-      const abr = abrechnungFuer(pl.id, reportMonth);
+      const abr = pp ? abrechnungFuer(pp.id, reportMonth) : null;
       // Ohne Stunden gibt es nichts abzurechnen - AUSSER die Position wurde schon
       // fakturiert. Die muss sichtbar bleiben, sonst verschwindet eine gestellte
       // Rechnung spurlos, wenn ihre Stunden nachträglich zurückgezogen werden.
@@ -1724,11 +1765,12 @@ function reportZeilen(kundeFilter) {
       else if (pl.rate_unit === 'tag') { menge = round2(stunden / STUNDEN_PRO_TAG); einheit = 'Days'; }
       zeilen.push({
         placementId: pl.id,
+        projektEintragId: pp ? pp.id : null,
         kundeName: k ? k.name : 'kein Kunde zugeordnet',
         ohneKunde: !k,
         contractor: cd.contractor || '–',
-        projektName: pl.projekt_name || '',
-        projektNummer: pl.projekt_nummer || '',
+        projektName: (pp && pp.projekt_name) || '',
+        projektNummer: (pp && pp.projekt_nummer) || '',
         placementCode: pl.placement_code || '',
         placementBeschreibung: pl.placement_description || '',
         stunden: round2(stunden),
@@ -1745,8 +1787,11 @@ function reportZeilen(kundeFilter) {
         abr,
       });
     });
+    });
   });
-  zeilen.sort((a, b) => a.kundeName.localeCompare(b.kundeName) || a.contractor.localeCompare(b.contractor));
+  zeilen.sort((a, b) => a.kundeName.localeCompare(b.kundeName)
+    || a.contractor.localeCompare(b.contractor)
+    || a.projektNummer.localeCompare(b.projektNummer));
   return { zeilen, warnungen };
 }
 
@@ -1755,6 +1800,7 @@ function reportsHTML() {
   const sichtbar = reportNurOffen ? zeilen.filter(z => !z.abr) : zeilen;
   const offen = zeilen.filter(z => !z.abr);
   const summe = sichtbar.reduce((sum, z) => sum + z.totalCharge, 0);
+  const ohneSatz = sichtbar.filter(z => z.menge && !z.chargeRate);
   const gewaehlterKunde = reportKundeId ? kunde(reportKundeId) : null;
   return `
     <div class="card panel">
@@ -1776,6 +1822,12 @@ function reportsHTML() {
           ? `<button class="btn primary" id="reportAlleAbrBtn">Alle ${offen.length} als abgerechnet markieren</button>`
           : ''}
       </div>
+      ${ohneSatz.length ? `
+      <div style="border:1px solid var(--amber);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:12.5px;color:var(--amber);">
+        <strong>${ohneSatz.length} Position(en) ohne hinterlegten Satz</strong> – sie stehen mit 0,00 € in der Summe:
+        ${esc(ohneSatz.map(z => z.contractor + (z.projektNummer ? ' / ' + z.projektNummer : '')).join(', '))}.
+        Satz am Placement nachtragen, sonst fehlt der Betrag auf der Rechnung.
+      </div>` : ''}
       ${warnungen.length ? `
       <div style="border:1px solid var(--amber);border-radius:6px;padding:10px 12px;margin-bottom:14px;font-size:12.5px;color:var(--amber);">
         <strong>${warnungen.length} Position(en) fehlen in dieser Liste:</strong>
@@ -1784,7 +1836,7 @@ function reportsHTML() {
       <div class="table-scroll">
         <table>
           <thead><tr>
-            <th>Kunde</th><th>Contractor</th><th>Projekt</th>
+            <th>Kunde</th><th>Contractor</th><th>Projektnummer</th><th>Projekt</th>
             <th style="text-align:right;">Menge</th><th>Einheit</th>
             <th style="text-align:right;">Satz</th><th style="text-align:right;">Betrag</th>
             <th>PO</th><th>Abgerechnet</th><th></th>
@@ -1798,10 +1850,13 @@ function reportsHTML() {
               return `<tr>
                 <td>${z.ohneKunde ? '<span class="mini-badge manuell">kein Kunde zugeordnet</span>' : esc(z.kundeName)}</td>
                 <td>${esc(z.contractor)}</td>
+                <td>${z.projektNummer ? esc(z.projektNummer) : '<span class="empty" style="padding:0;">–</span>'}</td>
                 <td>${esc(z.projektName || '–')}${z.placementCode ? ` <span style="color:var(--muted);font-size:11px;">${esc(z.placementCode)}</span>` : ''}</td>
                 <td style="text-align:right;">${fmtNum(z.menge, 2)}</td>
                 <td>${z.einheitLabel}</td>
-                <td style="text-align:right;">${fmtEUR2(z.chargeRate)}</td>
+                <td style="text-align:right;">${z.chargeRate
+                  ? fmtEUR2(z.chargeRate)
+                  : '<span class="mini-badge manuell" style="margin:0;">kein Satz</span>'}</td>
                 <td style="text-align:right;font-weight:600;">${fmtEUR2(z.totalCharge)}</td>
                 <td>${z.poReferenz ? esc(z.poReferenz) : '<span class="empty" style="padding:0;">–</span>'}${
                   z.poPfad ? ` <button class="link" data-report-po="${esc(z.poPfad)}">PDF</button>` : ''}</td>
@@ -1811,14 +1866,14 @@ function reportsHTML() {
                     + (abweichung ? `<div style="color:var(--amber);font-size:11px;">abgerechnet mit ${fmtNum(z.abr.stunden, 2)} Std., aktuell ${fmtNum(z.stunden, 2)} Std.</div>` : '')
                   : '<span class="mini-badge manuell">offen</span>'}</td>
                 <td>${z.abr
-                  ? `<button class="link danger" data-abr-weg="${z.placementId}">Zurücknehmen</button>`
-                  : `<button class="link" data-abr-set="${z.placementId}">Abgerechnet</button>`}</td>
+                  ? `<button class="link danger" data-abr-weg="${z.projektEintragId}">Zurücknehmen</button>`
+                  : `<button class="link" data-abr-set="${z.projektEintragId}">Abgerechnet</button>`}</td>
               </tr>`;
             }).join('')}
-            ${!sichtbar.length ? `<tr><td colspan="10" class="empty">Keine ${reportNurOffen ? 'offenen ' : ''}Positionen für ${monthLabel(reportMonth)}.</td></tr>` : ''}
+            ${!sichtbar.length ? `<tr><td colspan="11" class="empty">Keine ${reportNurOffen ? 'offenen ' : ''}Positionen für ${monthLabel(reportMonth)}.</td></tr>` : ''}
           </tbody>
           ${sichtbar.length ? `<tfoot><tr>
-            <td colspan="6" style="text-align:right;font-weight:600;">Summe (${sichtbar.length} Position(en))</td>
+            <td colspan="7" style="text-align:right;font-weight:600;">Summe (${sichtbar.length} Position(en))</td>
             <td style="text-align:right;font-weight:700;">${fmtEUR2(summe)}</td>
             <td colspan="3"></td>
           </tr></tfoot>` : ''}
@@ -1831,19 +1886,19 @@ function reportsHTML() {
 // Vermerk setzen: Placement X ist für Monat Y an den Kunden fakturiert.
 // Stunden und Betrag werden als Momentaufnahme mitgespeichert (siehe
 // sql/26_migration_abrechnungen.sql).
-async function markiereAbgerechnet(placementId) {
-  const z = reportZeilen().zeilen.find(x => x.placementId === placementId);
+async function markiereAbgerechnet(projektEintragId) {
+  const z = reportZeilen().zeilen.find(x => x.projektEintragId === projektEintragId);
   if (!z) return;
   const nr = prompt(`Rechnungsnummer für ${z.contractor} (${monthLabel(reportMonth)})?\n\nKann leer bleiben.`, '');
   if (nr === null) return; // abgebrochen
   const eintrag = {
-    placement_id: placementId, month: reportMonth,
+    placement_projekt_id: projektEintragId, placement_id: z.placementId, month: reportMonth,
     rechnungsnummer: nr.trim() || null,
     stunden: z.stunden, betrag: z.totalCharge,
     abgerechnet_am: new Date().toISOString(),
     abgerechnet_von: session && session.user ? session.user.email : null,
   };
-  if (!await save(sb.from('abrechnungen').upsert(eintrag, { onConflict: 'placement_id,month' }), 'Abrechnung vermerken')) return;
+  if (!await save(sb.from('abrechnungen').upsert(eintrag, { onConflict: 'placement_projekt_id,month' }), 'Abrechnung vermerken')) return;
   await loadAll();
 }
 
@@ -1859,18 +1914,18 @@ async function markiereAlleAbgerechnet() {
   if (nr === null) return;
   const jetzt = new Date().toISOString();
   const eintraege = offen.map(z => ({
-    placement_id: z.placementId, month: reportMonth,
+    placement_projekt_id: z.projektEintragId, placement_id: z.placementId, month: reportMonth,
     rechnungsnummer: nr.trim() || null,
     stunden: z.stunden, betrag: z.totalCharge,
     abgerechnet_am: jetzt,
     abgerechnet_von: session && session.user ? session.user.email : null,
   }));
-  if (!await save(sb.from('abrechnungen').upsert(eintraege, { onConflict: 'placement_id,month' }), 'Abrechnungen vermerken')) return;
+  if (!await save(sb.from('abrechnungen').upsert(eintraege, { onConflict: 'placement_projekt_id,month' }), 'Abrechnungen vermerken')) return;
   await loadAll();
 }
 
-async function abrechnungZuruecknehmen(placementId) {
-  const abr = abrechnungFuer(placementId, reportMonth);
+async function abrechnungZuruecknehmen(projektEintragId) {
+  const abr = abrechnungFuer(projektEintragId, reportMonth);
   if (!abr) return;
   if (!confirm(`Vermerk "abgerechnet" für ${monthLabel(reportMonth)} entfernen? Die Position gilt danach wieder als offen.`)) return;
   if (!await save(sb.from('abrechnungen').delete().eq('id', abr.id), 'Abrechnung zurücknehmen')) return;
@@ -1899,6 +1954,8 @@ function generateKundenReport() {
     'Client name': z.ohneKunde ? '' : z.kundeName,
     'Placement description': z.placementBeschreibung,
     'Work quantity': z.menge,
+    // Spaltennamen bleiben englisch wie im bisherigen Timesheet-Portal-Export -
+    // die Datei geht so an den Kunden und soll dort wiedererkannt werden.
     'Rate code': z.projektNummer,
     'Rate description': z.projektName,
     'Units': z.einheit,
@@ -1924,7 +1981,9 @@ function generateKundenReport() {
 function blankPlacement() {
   return {
     id: null, _tempId: 'new-' + Math.random().toString(36).slice(2),
-    projekt_name: '', projekt_nummer: '', status: 'Entwurf', linked_project_id: null,
+    status: 'Entwurf',
+    // Mindestens ein Projekt - eine Vereinbarung ohne Projekt gibt es nicht.
+    projekte: [blankPlacementProjekt()],
     rate_unit: 'stunde', projekttyp: 'contract', rechnungsname: '',
     start_date: '', end_date: '', wochenstunden: 40, pay_rate: 0, charge_rate: 0,
     deal_value: '', amount_ordered_hours: '', consultant1_id: '', consultant2_id: '',
@@ -1945,7 +2004,17 @@ function approvedHoursForProject(projectId) {
 
 function openCandidateModal(id) {
   const cd = id ? candidate(id) : null;
-  const existing = id ? placementsOf(id).map(sp => ({ ...sp })) : [];
+  // Kopien, damit "Abbrechen" nichts hinterlässt. Die Projekte hängen
+  // als eigene Liste am Placement (Migration 27); hat ein Placement noch keinen
+  // Eintrag (Migration noch nicht gelaufen), wird einer aus den Altfeldern gebaut.
+  const existing = id ? placementsOf(id).map(sp => {
+    const kopie = { ...sp };
+    const eigene = projekteVon(sp.id).map(pp => ({ ...pp }));
+    kopie.projekte = eigene.length ? eigene : [Object.assign(blankPlacementProjekt(), {
+      projekt_name: sp.projekt_name || '', projekt_nummer: sp.projekt_nummer || '',
+    })];
+    return kopie;
+  }) : [];
   modalConfig = {
     type: 'candidate', id: id || null,
     values: cd ? { ...cd } : { org: activeOrg, contractor: '', freelancer_email: '', vat_id: '', kunde: '', kunde_id: '', status: 'Aktiv' },
@@ -1963,11 +2032,15 @@ function syncPlacementsFromDOM(c) {
   c.placements.forEach(pl => {
     const k = placementKey(pl);
     const el = id => document.getElementById(id + '_' + k);
-    const nameEl = el('pl_name');
-    if (!nameEl) return; // Karte nicht (mehr) im DOM - unverändert lassen
-    pl.projekt_name = nameEl.value.trim();
-    pl.projekt_nummer = el('pl_nummer').value.trim();
     const artEl = el('pl_art');
+    if (!artEl) return; // Karte nicht (mehr) im DOM - unverändert lassen
+    (pl.projekte || []).forEach(pp => {
+      const nEl = document.getElementById('pp_name_' + ppKey(pp));
+      const nrEl = document.getElementById('pp_nummer_' + ppKey(pp));
+      if (!nEl || !nrEl) return;
+      pp.projekt_name = nEl.value.trim();
+      pp.projekt_nummer = nrEl.value.trim();
+    });
     const isPerm = artEl.value === 'perm';
     pl.projekttyp = isPerm ? 'perm' : 'contract';
     pl.rate_unit = el('pl_rateunit').value;
@@ -2022,6 +2095,9 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
   const k = placementKey(pl);
   const isPerm = pl.projekttyp === 'perm';
   const advanced = modalConfig && modalConfig.advancedOpen && modalConfig.advancedOpen.has(k);
+  const projekte = pl.projekte || [];
+  // Eine Projektzeile je Placement (= je Contractor), wie in der Projektliste bei
+  // peax. Die Projekte darunter unterteilen nur Timesheet und Report.
   const abgerechnet = pl.linked_project_id ? round1(approvedHoursForProject(pl.linked_project_id)) : 0;
   const poStunden = pl.po_stunden_gesamt;
   const rest = poStunden != null ? round1(poStunden - abgerechnet) : null;
@@ -2038,9 +2114,22 @@ function placementCardHTML(pl, idx, isPeax, kundeObj) {
           <button class="link danger" data-remove-pl="${k}">Entfernen</button>
         </div>
       </div>
-      <div class="field-row">
-        <div class="field"><label>Projektname</label><input type="text" id="pl_name_${k}" value="${esc(pl.projekt_name || '')}"></div>
-        <div class="field"><label>Projektnummer</label><input type="text" id="pl_nummer_${k}" value="${esc(pl.projekt_nummer || '')}"></div>
+      <div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <strong style="font-size:12px;">Projekte${projekte.length > 1 ? ` (${projekte.length})` : ''}</strong>
+          <button class="link" data-add-pp="${k}">+ Projekt</button>
+        </div>
+        ${projekte.map(pp => {
+          const pk = ppKey(pp);
+          return `
+        <div class="field-row" style="align-items:flex-end;">
+          <div class="field"><label>Projektname</label><input type="text" id="pp_name_${pk}" value="${esc(pp.projekt_name || '')}"></div>
+          <div class="field"><label>Projektnummer</label><input type="text" id="pp_nummer_${pk}" value="${esc(pp.projekt_nummer || '')}"></div>
+          <div style="padding-bottom:10px;white-space:nowrap;">
+            ${projekte.length > 1 ? `<button class="link danger" data-remove-pp="${pk}">Entfernen</button>` : ''}
+          </div>
+        </div>`;
+        }).join('')}
       </div>
       <div class="field-row">
         <div class="field">
@@ -2213,6 +2302,29 @@ function renderCandidateModal(c) {
     c.placements = c.placements.filter(pl => placementKey(pl) !== b.dataset.removePl);
     render();
   }));
+  document.querySelectorAll('[data-add-pp]').forEach(b => b.addEventListener('click', () => {
+    syncPlacementsFromDOM(c);
+    const pl = c.placements.find(x => placementKey(x) === b.dataset.addPp);
+    if (pl) { pl.projekte = (pl.projekte || []).concat([blankPlacementProjekt()]); render(); }
+  }));
+  document.querySelectorAll('[data-remove-pp]').forEach(b => b.addEventListener('click', () => {
+    syncPlacementsFromDOM(c);
+    const pk = b.dataset.removePp;
+    for (const pl of c.placements) {
+      const treffer = (pl.projekte || []).find(pp => ppKey(pp) === pk);
+      if (!treffer) continue;
+      // Auf ein Projekt können bereits Stunden gebucht sein. Die bleiben zwar
+      // in der Projektzeile stehen, verlieren aber ihre Rechnungsposition im
+      // Report - deshalb Rückfrage statt stillem Entfernen.
+      const gebucht = treffer.id && data.timesheets.some(t => t.placement_projekt_id === treffer.id);
+      if (gebucht && !confirm(
+        `Auf "${treffer.projekt_name || treffer.projekt_nummer || 'dieses Projekt'}" wurden bereits Stunden gebucht.\n\n`
+        + 'Sie bleiben im Projekt stehen, erscheinen aber nicht mehr als eigene Position im Report. Wirklich entfernen?')) return;
+      pl.projekte = pl.projekte.filter(pp => ppKey(pp) !== pk);
+      break;
+    }
+    render();
+  }));
   document.querySelectorAll('[data-generate-pl]').forEach(b => b.addEventListener('click', async () => {
     syncPlacementsFromDOM(c);
     const pl = c.placements.find(x => placementKey(x) === b.dataset.generatePl);
@@ -2256,7 +2368,7 @@ function renderCandidateModal(c) {
       }
       for (const pl of c.placements) {
         const plPayload = {
-          candidate_id: candidateId, projekt_name: pl.projekt_name || null, projekt_nummer: pl.projekt_nummer || null,
+          candidate_id: candidateId,
           rate_unit: pl.rate_unit, projekttyp: pl.projekttyp, rechnungsname: pl.rechnungsname,
           start_date: pl.start_date, end_date: pl.end_date, wochenstunden: pl.wochenstunden,
           pay_rate: pl.pay_rate, charge_rate: pl.charge_rate, deal_value: pl.deal_value, amount_ordered_hours: pl.amount_ordered_hours,
@@ -2267,14 +2379,43 @@ function renderCandidateModal(c) {
           kunde_override_vat_id: pl.kunde_override_vat_id, kunde_override_adresse: pl.kunde_override_adresse,
           contractor_invoice_email: pl.contractor_invoice_email,
         };
+        let istNeu = false;
         if (pl.id) {
           if (!await save(sb.from('placements').update(plPayload).eq('id', pl.id), 'Placement')) return;
         } else {
           const plInserted = await save(sb.from('placements').insert(plPayload).select().single(), 'Placement');
           if (!plInserted) return;
           pl.id = plInserted.id;
-          neuAngelegt.push(pl);
+          istNeu = true;
         }
+
+        // Projekte darunter. Vollständig leere Zeilen (weder Name noch
+        // Nummer) werden verworfen - das sind übrig gebliebene Eingabefelder, kein
+        // Projekt. Bleibt dabei nichts übrig, wird ein namenloser Eintrag behalten,
+        // damit trotzdem eine Projektzeile entsteht (Verhalten wie bisher).
+        const gefuellt = (pl.projekte || []).filter(pp => (pp.projekt_name || '').trim() || (pp.projekt_nummer || '').trim());
+        pl.projekte = gefuellt.length ? gefuellt : [(pl.projekte || [])[0] || blankPlacementProjekt()];
+
+        const vorhandene = new Set(projekteVon(pl.id).map(pp => pp.id));
+        const behalten = new Set(pl.projekte.filter(pp => pp.id).map(pp => pp.id));
+        for (const altId of vorhandene) {
+          if (!behalten.has(altId) && !await save(sb.from('placement_projekte').delete().eq('id', altId), 'Projekt entfernen')) return;
+        }
+        for (const pp of pl.projekte) {
+          const ppPayload = {
+            placement_id: pl.id,
+            projekt_name: (pp.projekt_name || '').trim() || null,
+            projekt_nummer: (pp.projekt_nummer || '').trim() || null,
+          };
+          if (pp.id) {
+            if (!await save(sb.from('placement_projekte').update(ppPayload).eq('id', pp.id), 'Projekt')) return;
+          } else {
+            const ppInserted = await save(sb.from('placement_projekte').insert(ppPayload).select().single(), 'Projekt');
+            if (!ppInserted) return;
+            pp.id = ppInserted.id;
+          }
+        }
+        if (istNeu) neuAngelegt.push(pl);
       }
 
       // Aus jedem NEUEN Placement direkt eine Projektzeile machen, damit es ohne
@@ -2282,16 +2423,17 @@ function renderCandidateModal(c) {
       const org = c.id ? c.values.org : activeOrg;
       const contractorName = payload.contractor;
       for (const pl of neuAngelegt) {
+        const bezeichnung = (pl.projekte[0] && (pl.projekte[0].projekt_name || pl.projekte[0].projekt_nummer)) || 'Placement ohne Namen';
         const grund = placementBereitFuerProjekt(pl, org);
-        if (grund) { uebersprungen.push(`${pl.projekt_name || 'Placement ohne Namen'}: ${grund}`); continue; }
-        const projPayload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractorName);
+        if (grund) { uebersprungen.push(`${bezeichnung}: ${grund}`); continue; }
+        const projPayload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractorName, pl.projekte[0]);
         const proj = await save(sb.from('projects').insert(projPayload).select().single(), 'Projekt aus Placement');
         if (!proj) continue;
         if (await save(sb.from('placements').update({ linked_project_id: proj.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt')) {
           pl.linked_project_id = proj.id;
           erzeugt.push(proj);
           if (await timesheetZugangSetzen(payload.contractor_id, proj.id)) zugeordnet++;
-          else if (!payload.contractor_id) ohneZugang.push(pl.projekt_name || 'Placement ohne Namen');
+          else if (!payload.contractor_id) ohneZugang.push(bezeichnung);
         }
       }
 
@@ -2305,12 +2447,12 @@ function renderCandidateModal(c) {
         if (!pl.id || !pl.linked_project_id || neuAngelegt.includes(pl)) continue;
         const proj = project(pl.linked_project_id);
         if (!proj) continue;
-        const projPayload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractorName);
+        const projPayload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractorName, (pl.projekte || [])[0]);
         const diff = projektAbweichungen(projPayload, proj);
         if (!diff.length) continue;
         const wahl = await frageDialog(
           'Placement geändert – was soll mit dem Projekt passieren?',
-          `Placement "${pl.projekt_name || 'ohne Namen'}" weicht von der verknüpften Projektzeile ab:\n\n`
+          `Placement "${(pl.projekte && pl.projekte[0] && pl.projekte[0].projekt_name) || 'ohne Namen'}" weicht von der verknüpften Projektzeile ab:\n\n`
           + diff.map(d => '• ' + d).join('\n')
           + '\n\nDer Status der Projektzeile (Aktiv/Pausiert/…) bleibt in jedem Fall unangetastet.',
           [
@@ -2445,10 +2587,14 @@ async function timesheetZugangSetzen(contractorId, projectId) {
   return true;
 }
 
-function projektPayloadAusPlacement(pl, org, kundeIdVal, contractor) {
+function projektPayloadAusPlacement(pl, org, kundeIdVal, contractor, pp) {
   const isPerm = pl.projekttyp === 'perm';
   const payload = {
     org, projekttyp: pl.projekttyp, kunde_id: kundeIdVal, kunde: kundeName(kundeIdVal), contractor,
+    // Der Projektname kommt vom Projekt-Eintrag, nicht vom Placement. Steht bewusst NICHT
+    // in projektAbweichungen: sonst meldete jede Zeile eine Abweichung, nur weil
+    // ältere Projektzeilen noch gar keinen Namen tragen.
+    projektname: pp ? (pp.projekt_name || null) : null,
     rechnungsname: pl.rechnungsname, start_date: pl.start_date, end_date: pl.end_date || (isPerm ? pl.start_date : null),
     pay_h: pl.pay_rate, charge_h: pl.charge_rate, consultant1_id: pl.consultant1_id, consultant2_id: pl.consultant2_id,
     status: 'Auto',
@@ -2477,7 +2623,7 @@ async function generateProjectFromPlacement(c, pl) {
   if (!kundeIdVal) { alert('Bitte zuerst einen Kunden auswählen.'); return; }
   const kundeNameVal = kundeName(kundeIdVal);
   const contractor = document.getElementById('cd_contractor') ? document.getElementById('cd_contractor').value.trim() : c.values.contractor;
-  const payload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractor);
+  const payload = projektPayloadAusPlacement(pl, org, kundeIdVal, contractor, (pl.projekte || [])[0]);
   const { data: inserted, error } = await sb.from('projects').insert(payload).select().single();
   if (error) { alert(error.message); return; }
   pl.linked_project_id = inserted.id;
@@ -2486,11 +2632,19 @@ async function generateProjectFromPlacement(c, pl) {
     // Schlägt das fehl, existiert das Projekt bereits, das Placement weiß aber
     // nichts davon - deshalb hier explizit melden statt still weiterzulaufen.
     await save(sb.from('placements').update({ linked_project_id: inserted.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt');
+    // Projekte, die es im Formular schon gibt, aber noch nicht in der Datenbank.
+    for (const pp of (pl.projekte || [])) {
+      if (pp.id) continue;
+      const ppNeu = await save(sb.from('placement_projekte').insert({
+        placement_id: pl.id, projekt_name: pp.projekt_name || null, projekt_nummer: pp.projekt_nummer || null,
+      }).select().single(), 'Projekt anlegen');
+      if (ppNeu) pp.id = ppNeu.id;
+    }
   } else {
     // Placement existiert noch nicht in der DB (neu angelegt, noch nicht gespeichert) - gleich
     // mit anlegen, damit die Verknüpfung nicht beim nächsten Speichern verloren geht.
     const plInserted = await save(sb.from('placements').insert({
-      candidate_id: c.id, projekt_name: pl.projekt_name || null, projekt_nummer: pl.projekt_nummer || null,
+      candidate_id: c.id,
       rate_unit: pl.rate_unit, projekttyp: pl.projekttyp, rechnungsname: pl.rechnungsname,
       start_date: pl.start_date, end_date: pl.end_date, wochenstunden: pl.wochenstunden,
       pay_rate: pl.pay_rate, charge_rate: pl.charge_rate, deal_value: pl.deal_value, amount_ordered_hours: pl.amount_ordered_hours,
@@ -2502,7 +2656,15 @@ async function generateProjectFromPlacement(c, pl) {
       contractor_invoice_email: pl.contractor_invoice_email,
       linked_project_id: inserted.id, status: 'Projekt erzeugt',
     }).select().single(), 'Placement anlegen');
-    if (plInserted) pl.id = plInserted.id;
+    if (plInserted) {
+      pl.id = plInserted.id;
+      for (const pp of (pl.projekte || [])) {
+        const ppNeu = await save(sb.from('placement_projekte').insert({
+          placement_id: pl.id, projekt_name: pp.projekt_name || null, projekt_nummer: pp.projekt_nummer || null,
+        }).select().single(), 'Projekt anlegen');
+        if (ppNeu) pp.id = ppNeu.id;
+      }
+    }
   }
   // Gleicher Weg wie beim automatischen Anlegen: Freelancer direkt fürs
   // Timesheet freischalten, sofern am Kandidaten ein Contractor hinterlegt ist.
@@ -2519,6 +2681,9 @@ async function generateProjectFromPlacement(c, pl) {
 // den CRM-eigenen Feldern (Konditionen, Zahlungsziel, PO-Stand). Bearbeiten passiert weiterhin im
 // Kandidaten-Modal (Tab "CRM") - hier nur Übersicht + Sprung zu Kunde/Kandidat.
 function placementsHTML() {
+  // Eine Zeile je Projekt. Der Abrechnungsstand gegen die PO gilt für das
+  // ganze Placement (die PO ist mit der Person vereinbart) und steht deshalb in jeder
+  // Zeile derselben Person gleich - die Stundenspalte davor ist die des einzelnen Projekts.
   const rows = data.placements.map(pl => {
     const cd = candidate(pl.candidate_id);
     if (!cd) return null;
@@ -2544,7 +2709,7 @@ function placementsHTML() {
             ${rows.map(r => `<tr>
               <td>${r.kd ? `<button class="link" data-view-kunde-pl="${r.kd.id}">${esc(r.kd.name)}</button>` : '–'}</td>
               <td><button class="link" data-view-candidate-pl="${r.cd.id}">${esc(r.cd.contractor)}</button></td>
-              <td>${esc(r.pl.projekt_name || '(ohne Namen)')}${r.pl.projekt_nummer ? ' #' + r.pl.projekt_nummer : ''}</td>
+              <td>${esc(placementBezeichnung(r.pl, r.cd))}</td>
               <td>${fmtNum(r.pl.pay_rate, 2)}${r.unitLabel}</td>
               <td>${fmtNum(r.pl.charge_rate, 2)}${r.unitLabel}</td>
               <td>${fmtNum(r.marge, 2)}</td>
@@ -2579,7 +2744,9 @@ function crmHTML() {
               const pls = placementsOf(cd.id);
               return `<tr>
               <td>${esc(cd.contractor)}</td><td>${esc(cd.kunde)}</td>
-              <td>${pls.length ? pls.map(pl => `${esc(pl.projekt_name || '(ohne Namen)')}${pl.projekt_nummer ? ' #' + pl.projekt_nummer : ''} <span class="mini-badge ${pl.linked_project_id ? 'auto' : 'manuell'}">${pl.linked_project_id ? 'erzeugt' : 'Entwurf'}</span>`).join('<br>') : '<span class="empty" style="padding:0;">keine</span>'}</td>
+              <td>${pls.length ? pls.map(pl =>
+                `${esc(placementBezeichnung(pl, cd))} <span class="mini-badge ${pl.linked_project_id ? 'auto' : 'manuell'}">${pl.linked_project_id ? 'erzeugt' : 'Entwurf'}</span>`
+                ).join('<br>') : '<span class="empty" style="padding:0;">keine</span>'}</td>
               <td>${esc(cd.status)}</td>
               <td>
                 <button class="link" data-edit-candidate="${cd.id}">Bearbeiten</button>
@@ -2640,7 +2807,7 @@ async function loadAll() {
   // für die diese Person laut user_access Zugriff hat - bei Zugriff auf beide Firmen also
   // beide gemischt). data.projects/consultants werden danach auf activeOrg eingegrenzt,
   // data.allProjects bleibt firmenübergreifend für die KI-Vorschläge-Zuordnung erhalten.
-  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }, { data: abrechnungen, error: e15 }] = await Promise.all([
+  const [{ data: allProjects, error: e1 }, { data: entries, error: e2 }, { data: allConsultants, error: e3 }, { data: kiVorschlaege, error: e4 }, { data: teamMemberships, error: e5 }, { data: contractors, error: e6 }, { data: contractorProjects, error: e9 }, { data: timesheets, error: e7 }, { data: timesheetDays, error: e8 }, { data: candidates, error: e10 }, { data: candidateProjects, error: e11 }, { data: placementProjekte, error: e16 }, { data: kunden, error: e12 }, { data: consultantRates, error: e13 }, { data: contractorAliase, error: e14 }, { data: abrechnungen, error: e15 }] = await Promise.all([
     loadTable('projects', 'created_at'),
     loadTable('entries'),
     loadTable('consultants', 'created_at'),
@@ -2661,6 +2828,9 @@ async function loadAll() {
     // migration_crm_subprojekte.sql und migration_placements.sql).
     loadTable('candidates', 'created_at', false),
     loadTable('placements', 'created_at', false),
+    // Projekte unter einem Placement (Migration 27) - optional wie die
+    // anderen neueren Tabellen.
+    loadTable('placement_projekte', 'created_at'),
     // kunden (CRM-Stammdaten pro Kunde) ist ebenfalls optional (siehe migration_kunden.sql).
     loadTable('kunden', 'name'),
     // consultant_rates ist admin-only (Migration 20). Für alle anderen kommt
@@ -2687,6 +2857,7 @@ async function loadAll() {
   if (e13) console.warn('Provisionssätze konnten nicht geladen werden (20_migration_rollen.sql ausgeführt?)', e13);
   if (e14) console.warn('Alias-Namen konnten nicht geladen werden (22_migration_contractor_aliase.sql ausgeführt?)', e14);
   if (e15) console.warn('Abrechnungs-Vermerke konnten nicht geladen werden (26_migration_abrechnungen.sql ausgeführt?)', e15);
+  if (e16) console.warn('Placement-Projekte konnten nicht geladen werden (27_migration_placement_projekte.sql ausgeführt?)', e16);
   data.allProjects = allProjects || [];
   data.projects = data.allProjects.filter(p => p.org === activeOrg);
   const projectIds = new Set(data.projects.map(p => p.id));
@@ -2706,7 +2877,9 @@ async function loadAll() {
   const candidateIds = new Set(data.candidates.map(cd => cd.id));
   data.placements = (candidateProjects || []).filter(cp => candidateIds.has(cp.candidate_id));
   const placementIds = new Set(data.placements.map(pl => pl.id));
-  data.abrechnungen = (abrechnungen || []).filter(a => placementIds.has(a.placement_id));
+  data.placementProjekte = (placementProjekte || []).filter(pp => placementIds.has(pp.placement_id));
+  const ppIds = new Set(data.placementProjekte.map(pp => pp.id));
+  data.abrechnungen = (abrechnungen || []).filter(a => ppIds.has(a.placement_projekt_id));
   data.kunden = (kunden || []).filter(k => k.org === activeOrg);
   data.consultants = (allConsultants || []).filter(c => c.org === activeOrg);
   // Provisionssätze liegen seit Migration 20 in einer eigenen, nur für Admins
@@ -2788,6 +2961,7 @@ function subscribeRealtime() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'candidates' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'placements' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'kunden' }, () => loadAll())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'placement_projekte' }, () => loadAll())
     .on('postgres_changes', { event: '*', schema: 'public', table: 'abrechnungen' }, () => loadAll())
     .subscribe();
 }
@@ -3132,7 +3306,7 @@ function renderSchnellanlage(c) {
 
     // 4) Placement mit den Konditionen
     const plPayload = {
-      candidate_id: kand.id, projekt_name: (v.projekt_name || '').trim() || null,
+      candidate_id: kand.id,
       projekttyp: v.projekttyp, rate_unit: 'stunde',
       // Firma, unter der abgerechnet wird. Wird vom Weclapp-Abgleich mitgeprüft -
       // hier gleich eingetragen, landen die Rechnungen später automatisch beim
@@ -3146,11 +3320,18 @@ function renderSchnellanlage(c) {
     const pl = await save(sb.from('placements').insert(plPayload).select().single(), 'Placement');
     if (!pl) return;
 
+    // 4b) Erstes Projekt unter diesem Placement. Weitere kommen bei
+    // Bedarf im CRM dazu - die Konditionen oben gelten dann für alle.
+    const pp = await save(sb.from('placement_projekte').insert({
+      placement_id: pl.id, projekt_name: (v.projekt_name || '').trim() || null,
+    }).select().single(), 'Projekt');
+    if (!pp) return;
+
     // 5) Projektzeile - dieselbe Funktion wie überall sonst
-    const projPayload = projektPayloadAusPlacement(pl, org, kundeId, name);
+    const projPayload = projektPayloadAusPlacement(pl, org, kundeId, name, pp);
     const proj = await save(sb.from('projects').insert(projPayload).select().single(), 'Projekt');
     if (!proj) return;
-    await save(sb.from('placements').update({ linked_project_id: proj.id, status: 'Projekt erzeugt' }).eq('id', pl.id), 'Verknüpfung Placement → Projekt', true);
+    await save(sb.from('placement_projekte').update({ linked_project_id: proj.id, status: 'Projekt erzeugt' }).eq('id', pp.id), 'Verknüpfung Projekt → Projektzeile', true);
 
     // 6) Timesheet freischalten
     const zugang = await timesheetZugangSetzen(ct.id, proj.id);
@@ -4129,14 +4310,16 @@ async function loadContractorPortal() {
   await loadContractorTimesheet();
 }
 
-// Lädt für JEDES Projekt des Contractors das Timesheet des gewählten Monats.
-// Vorher wurde nur eines geladen und oben umgeschaltet - im bisherigen
-// Timesheet-Portal stehen aber alle Projekte untereinander auf einer Seite
-// (siehe Siemens-Timesheet: zwei Projektzeilen je Woche, je eigene Summe).
+// Lädt für JEDEN Eintrag des Contractors das Timesheet des gewählten Monats -
+// seit Migration 27 ist das ein Eintrag je Projekt unter dem Placement. Im
+// bisherigen Timesheet-Portal stehen alle untereinander auf einer Seite (siehe
+// Siemens-Timesheet: zwei Projektzeilen je Woche, je eigene Summe).
 async function loadContractorTimesheet() {
   contractorSheets = [];
   for (const proj of contractorProjects) {
-    const { data: tsRows, error } = await sb.rpc('my_timesheet', { p_project_id: proj.project_id, p_month: contractorMonth });
+    const { data: tsRows, error } = await sb.rpc('my_timesheet', {
+      p_project_id: proj.project_id, p_month: contractorMonth,
+      p_placement_projekt_id: proj.placement_projekt_id || null });
     if (error) { console.error('Timesheet konnte nicht geladen werden', proj.project_id, error); continue; }
     const ts = (tsRows && tsRows[0]) || null;
     if (!ts) continue;
@@ -4208,7 +4391,10 @@ function renderContractorPortal() {
   const projektBlock = (bl) => {
     const gesperrt = bl.ts.status === 'submitted' || bl.ts.status === 'approved';
     const tage = new Map(bl.days.map(d => [d.day, d]));
-    const titel = bl.proj.placement_name || bl.proj.projektname || bl.proj.kunde;
+    // Bei mehreren Projekten beim selben Kunden ist die Projektnummer das, woran der
+    // Freelancer sie auseinanderhält - deshalb steht sie im Titel.
+    const titel = (bl.proj.placement_name || bl.proj.projektname || bl.proj.kunde)
+      + (bl.proj.rate_code ? ' · ' + bl.proj.rate_code : '');
     return `
     <div class="ts-projekt">
       <div class="ts-projekt-kopf">
