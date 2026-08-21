@@ -546,12 +546,23 @@ function daysOfMonth(monthStr) {
 // amount_ordered_hours (wird beim Verteilen auf Monate weiter unten anteilig nach Tagen aufgeteilt).
 // Bei Perm-Projekten (Pauschalhonorar statt Stundenabrechnung) zählt immer genau 1 Stunde,
 // damit Umsatz = Stunden x Charge/h weiterhin die volle Rechnungssumme ergibt.
+// Arbeitstage je Monat - fester Durchschnitt statt echter Kalenderrechnung.
+// Die SOLL-Stunden sind eine Planung, keine Abrechnung: Mit echten Arbeitstagen
+// schwankte der Planwert je nach Monat zwischen 160 und 184 Stunden, ohne dass
+// sich am Vertrag etwas ändert. Feiertage sind aus demselben Grund nicht
+// abgezogen - die unterscheiden sich je nach Bundesland.
+const ARBEITSTAGE_PRO_MONAT = 21;
+const ARBEITSTAGE_PRO_WOCHE = 5;
+
 function projectTotalSollHours(p) {
   if (p.projekttyp === 'perm') return p.start_date ? 1 : 0;
   const ps = parseDateUTC(p.start_date), pe = parseDateUTC(p.end_date);
   if (ps === null || pe === null || pe < ps) return 0;
   if (p.org === 'peax') return round1(p.amount_ordered_hours || 0);
-  return round1((p.wochenstunden || 0) * daysInclusive(ps, pe) / 7);
+  // Summe der Monatswerte statt einer eigenen Formel: So kann die Spalte in der
+  // Projektliste nicht mehr etwas anderes behaupten als das, was tatsächlich
+  // auf die Monate verteilt und gespeichert wird.
+  return round1(monthListForProject(p).reduce((s, m) => s + projectMonthSollHours(p, m), 0));
 }
 
 // Anteil der Gesamtstunden, der auf einen bestimmten Monat entfällt (nach Tagesüberlappung).
@@ -575,7 +586,11 @@ function projectMonthSollHours(p, monthStr) {
     if (!totalDays) return 0;
     return round1(p.amount_ordered_hours * overlapDays / totalDays);
   }
-  return round1((p.wochenstunden || 0) * overlapDays / 7);
+  // KH: 8 Stunden am Tag (bei 40 Std./Woche) x 21 Arbeitstage = 168 Std. im
+  // vollen Monat. Teilmonate anteilig nach Kalendertagen.
+  const tagesStunden = (p.wochenstunden || 0) / ARBEITSTAGE_PRO_WOCHE;
+  const tageDesMonats = daysInclusive(ms, me);
+  return round1(tagesStunden * ARBEITSTAGE_PRO_MONAT * (overlapDays / tageDesMonats));
 }
 
 function monthListForProject(p) {
@@ -3238,14 +3253,19 @@ function rechteHTML() {
         <select id="neuerZugangOrg">
           ${allowedOrgs.map(o => `<option value="${esc(o)}">${esc(ORG_LABELS[o] || o)}</option>`).join('')}
         </select>
+        <select id="neuerZugangStart">
+          <option value="intern">Interne Person – alle Bereiche außer peax-CRM</option>
+          <option value="peax_crm">peax-Team – nur das peax-CRM</option>
+          <option value="keine">keine Bereiche – einzeln vergeben</option>
+        </select>
         <label style="font-size:12.5px;color:var(--muted);font-weight:600;display:inline-flex;align-items:center;gap:5px;">
           <input type="checkbox" id="neuerZugangAdmin"> Admin
         </label>
         <button class="btn primary" id="neuerZugangBtn">Freischalten</button>
       </div>
       <div class="empty" style="text-align:left;padding:8px 0 0;">
-        Die Person meldet sich danach selbst mit dieser Adresse an. Neue Zugänge bekommen
-        zunächst alle Bereiche – nicht Gewünschtes oben abwählen.
+        Die Person meldet sich danach selbst mit dieser Adresse an. Die Startbelegung lässt sich
+        oben in der Tabelle jederzeit ändern.
       </div>
     </div>
   `;
@@ -3257,12 +3277,23 @@ async function zugangHinzufuegen() {
   const email = (document.getElementById('neuerZugangEmail').value || '').trim().toLowerCase();
   const org = document.getElementById('neuerZugangOrg').value;
   const alsAdmin = document.getElementById('neuerZugangAdmin').checked;
+  const start = document.getElementById('neuerZugangStart').value;
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { alert('Bitte eine gültige E-Mail-Adresse eingeben.'); return; }
   if ((data.userAccess || []).some(u => u.email === email && u.org === org)) {
     alert('Diese Adresse ist für diese Firma bereits freigeschaltet.'); return;
   }
   if (alsAdmin && !confirm(`${email} als Admin freischalten?\n\nAdmins sehen und ändern alles in dieser Firma und können Rechte vergeben.`)) return;
   if (!await save(sb.from('user_access').insert({ email, org, role: alsAdmin ? 'admin' : 'user' }), 'Zugang anlegen')) return;
+  // Die Datenbank vergibt beim Anlegen automatisch alle internen Bereiche
+  // (Trigger aus Migration 29). Für die anderen beiden Fälle wird das hier
+  // korrigiert - Leute aus dem peax-Team sollen NICHT die Projektliste,
+  // Timesheets und Reports sehen, sondern nur ihr eigenes CRM.
+  if (start !== 'intern') {
+    if (!await save(sb.from('benutzer_bereiche').delete().eq('email', email).eq('org', org), 'Startbereiche setzen')) return;
+    if (start === 'peax_crm') {
+      if (!await save(sb.from('benutzer_bereiche').insert({ email, org, bereich: 'peax_crm' }), 'Bereich peax-CRM vergeben')) return;
+    }
+  }
   await loadAll();
 }
 
