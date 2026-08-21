@@ -610,6 +610,12 @@ function monthListForProject(p) {
 // Gleicht die SOLL-Einträge eines Projekts mit der berechneten Monatsverteilung ab.
 // Manuell überschriebene Monate (auto === false) werden dabei nicht angetastet.
 async function syncAutoSoll(proj) {
+  // Unterschied zwischen den Firmen (Stand 21.08.2026 mit Rike geklärt):
+  //   KH   - aus Std./Woche wird eine Stundenzahl BERECHNET (8 Std. x 21 Tage).
+  //   peax - hier wird nichts berechnet. Die bestellten Stunden trägt Rike beim
+  //          Kandidaten ein; verteilt wird diese Zahl nur auf die Laufzeitmonate,
+  //          die Summe bleibt exakt die eingegebene.
+
   const months = monthListForProject(proj);
   const monthSet = new Set(months);
   const existing = data.entries.filter(e => e.project_id === proj.id && e.kind === 'soll');
